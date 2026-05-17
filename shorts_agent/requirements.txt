@@ -1,0 +1,8 @@
+requests
+pydantic
+python-dotenv
+numpy
+soundfile
+opencv-python
+tqdm
+openai

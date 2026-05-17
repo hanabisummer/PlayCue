@@ -1,0 +1,42 @@
+{
+  "game_name": "Sample Game",
+  "game_exe": "C:\\Games\\SampleGame\\SampleGame.exe",
+  "game_args": "",
+  "process_name": "SampleGame.exe",
+  "auto_close_on_game_exit": true,
+  "obs": {
+    "enabled": false,
+    "auto_launch": false,
+    "exe_path": "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe",
+    "working_dir": "C:\\Program Files\\obs-studio\\bin\\64bit",
+    "args": "--minimize-to-tray",
+    "process_name": "obs64.exe",
+    "websocket_host": "127.0.0.1",
+    "websocket_port": 4455,
+    "websocket_password": "",
+    "connect_timeout_seconds": 30,
+    "connect_retry_interval_seconds": 2,
+    "auto_start_recording_on_game_launch": false,
+    "auto_stop_recording_on_game_exit": true
+  },
+  "auto_open_links": [
+    {
+      "name": "Official Site",
+      "url": "https://example.com"
+    }
+  ],
+  "buttons": [
+    {
+      "name": "Guide",
+      "url": "https://example.com/guide"
+    },
+    {
+      "name": "Local Memo",
+      "url": "C:\\Users\\YourName\\Documents\\sample_game_memo.txt"
+    }
+  ],
+  "always_on_top": true,
+  "opacity": 0.9,
+  "window_width": 360,
+  "window_height": 420
+}

@@ -1,0 +1,20 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+*.log
+
+# User-specific game paths, OBS passwords, and local links should not be published.
+configs/*.json
+!configs/example.json
+launchers/*.bat
+
+# Runtime play history and generated summaries.
+logs/*.csv
+!logs/.gitkeep
+outputs/
+
+# Local build outputs.
+dist/
+build/
+*.spec
