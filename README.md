@@ -2,7 +2,7 @@
 
 [日本語](README.md) | [English](README.en.md)
 
-PlayCueは、ゲーム配信・録画者向けの軽量Windowsウィジェットです
+PlayCueは、ゲーム配信・録画者向けの軽量Windowsウィジェットです。  
 PCゲームの起動、プレイ時間の記録、攻略リンクの表示、
 OBS録画開始・停止を一画面で管理できる Windows 向けウィジェットです。
 
