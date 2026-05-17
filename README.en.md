@@ -75,13 +75,6 @@ Play history is saved to `logs/play_history.csv`.
 
 This file contains your personal play history. Do not publish it to GitHub. This repository excludes it with `.gitignore`.
 
-## AI Shorts Helper
-
-`shorts_agent/` contains a helper CLI for creating short videos from recorded gameplay.
-
-It requires FFmpeg/FFprobe. VOICEVOX narration is optional. The tool is designed not to overwrite source videos, but outputs should always stay under `outputs/`.
-
-See [shorts_agent/README.md](shorts_agent/README.md) for details.
 
 ## Before Publishing to GitHub
 
