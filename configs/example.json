@@ -1,7 +1,8 @@
 {
   "game_name": "Sample Game",
-  "game_exe": "C:\\Games\\SampleGame\\SampleGame.exe",
+  "game_exe": "C:\\Games\\SampleGame\\SampleLauncher.exe",
   "game_args": "",
+  "launch_unelevated": false,
   "process_name": "SampleGame.exe",
   "auto_close_on_game_exit": true,
   "obs": {

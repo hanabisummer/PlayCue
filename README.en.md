@@ -9,10 +9,10 @@ It is designed so regular gamers can use it without technical knowledge: choose 
 ## Features
 
 - Launch registered games from the widget
-- Automatically track play time per game
+- Automatically track play time from the registered game process start to exit
 - Show recently played games near the top
 - Show game-specific links such as guides, notes, or spreadsheets
-- Automatically launch OBS Studio and start/stop recording
+- Automatically launch OBS Studio, start recording when the game process starts, and stop recording
 - Stop OBS recording automatically when the game exits
 - Stay in the task tray when minimized
 - Optional startup when Windows starts
@@ -50,9 +50,11 @@ Windows may ask for administrator permission on first launch. Allow it if you wa
 1. Open `Settings` at the top of the widget.
 2. Select `Add Game`.
 3. Enter the game name.
-4. Use `Browse` next to `Game exe Path` and select the game's `.exe` file.
-5. Add guide, note, or spreadsheet links if needed.
-6. Press `Create`.
+4. Use `Browse` next to `Launcher exe or Game exe Path` and select the `.exe` used to start the game.
+5. If the game has a launcher, select the launcher exe first. Otherwise, select the game exe.
+6. In `Process Name`, enter the actual game process name used to start play time tracking and OBS recording.
+7. Add guide, note, or spreadsheet links if needed.
+8. Press `Create`.
 
 The new game appears in the game list immediately.
 
@@ -67,7 +69,7 @@ Set this up only if you want automatic OBS recording.
 5. Enter the OBS exe path, port, and password.
 6. Press `Update Settings`.
 
-The widget can start recording when a game launches and stop recording when the game exits.
+The widget can start recording when the registered `Process Name` starts and stop recording when that process exits.
 
 ## Play Time Logs
 
@@ -87,6 +89,8 @@ Safe to publish:
 - `configs/example.json`
 - `shorts_agent/`
 - `tests/`
+
+`configs/example.json` is the public sample config. Treat real game settings as personal `configs/*.json` files.
 
 Do not publish:
 

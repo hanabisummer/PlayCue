@@ -4,6 +4,7 @@ import csv
 import ctypes
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -77,7 +78,8 @@ TEXT = {
         "total": "累計",
         "last_end_time": "前回終了時刻",
         "game_name": "ゲーム名",
-        "game_exe_path": "ゲームexeパス",
+        "game_exe_path": "ランチャーexe または ゲームexe の場所",
+        "game_exe_note": "※ゲームランチャーが存在する場合は優先してランチャーの場所を入力。ない場合はゲームexeの場所を入力",
         "browse": " 参照",
         "process_name": "プロセス名",
         "detect": " 検知",
@@ -130,7 +132,8 @@ TEXT = {
         "total": "Total",
         "last_end_time": "Last End Time",
         "game_name": "Game Name",
-        "game_exe_path": "Game exe Path",
+        "game_exe_path": "Launcher exe or Game exe Path",
+        "game_exe_note": "If the game has a launcher, enter the launcher path first. Otherwise, enter the game exe path.",
         "browse": " Browse",
         "process_name": "Process Name",
         "detect": " Detect",
@@ -212,7 +215,9 @@ class GameConfig:
     config_file: Path
     game_exe: str = ""
     game_args: str = ""
+    launch_unelevated: bool = False
     process_name: str = ""
+    active_process_name: str = ""
     auto_close_on_game_exit: bool = False
     obs: OBSConfig = OBSConfig()
     auto_open_links: tuple[LinkItem, ...] = ()
@@ -241,7 +246,9 @@ class ConfigLoader:
             config_file=path,
             game_exe=str(data.get("game_exe", "")).strip(),
             game_args=str(data.get("game_args", "")).strip(),
+            launch_unelevated=bool(data.get("launch_unelevated", False)),
             process_name=str(data.get("process_name", "")).strip(),
+            active_process_name=str(data.get("active_process_name", "")).strip(),
             auto_close_on_game_exit=bool(data.get("auto_close_on_game_exit", False)),
             obs=ConfigLoader._parse_obs(data.get("obs", {})),
             auto_open_links=ConfigLoader._parse_links(data.get("auto_open_links", [])),
@@ -324,6 +331,9 @@ class GameLauncher:
 
         try:
             args = shlex.split(config.game_args, posix=False) if config.game_args else []
+            if config.launch_unelevated and os.name == "nt" and is_admin() and not args:
+                subprocess.Popen(["explorer.exe", str(game_path)])
+                return
             subprocess.Popen([config.game_exe, *args], cwd=str(game_path.parent))
         except OSError as exc:
             messagebox.showerror("ゲーム起動エラー", f"{config.game_name} の起動に失敗しました:\n{exc}")
@@ -566,23 +576,49 @@ class GameProcessWatcher:
         missing_threshold: int = 2,
         exe_path: str = "",
         on_process_name_detected=None,
+        active_process_name: str = "",
+        on_active=None,
     ):
         self.process_name = process_name.lower()
+        self.process_names = self._parse_process_names(process_name)
+        self.active_process_names = self._parse_process_names(active_process_name)
         self.on_exit = on_exit
         self.grace_seconds = grace_seconds
         self.missing_threshold = missing_threshold
         self.exe_path = str(Path(exe_path).resolve()).lower() if exe_path else ""
         self.on_process_name_detected = on_process_name_detected
+        self.on_active = on_active
         self.started_at = time.monotonic()
         self.missing_count = 0
         self.seen_process = False
+        self.seen_active_process = False
         self.stopped = False
+
+    @staticmethod
+    def _parse_process_names(process_name: str) -> set[str]:
+        return {
+            name.strip().lower()
+            for name in re.split(r"[,;]", process_name)
+            if name.strip()
+        }
 
     def tick(self) -> None:
         if self.stopped or not self.process_name or psutil is None:
             return
 
-        if self._is_running():
+        is_running, is_active = self._process_state()
+        if is_active and not self.seen_active_process:
+            self.seen_active_process = True
+            if self.on_active:
+                self.on_active()
+
+        if self.active_process_names and not self.seen_active_process:
+            return
+
+        if self.active_process_names and self.seen_active_process:
+            is_running = is_active
+
+        if is_running:
             self.seen_process = True
             self.missing_count = 0
             return
@@ -595,24 +631,30 @@ class GameProcessWatcher:
             self.stopped = True
             self.on_exit()
 
-    def _is_running(self) -> bool:
+    def _process_state(self) -> tuple[bool, bool]:
         assert psutil is not None
+        is_running = False
+        is_active = False
         for proc in psutil.process_iter(["name", "exe"]):
             try:
                 proc_name = proc.info.get("name") or ""
-                if proc_name.lower() == self.process_name:
-                    return True
+                proc_name_lower = proc_name.lower()
+                if proc_name_lower in self.process_names:
+                    is_running = True
+                if proc_name_lower in self.active_process_names:
+                    is_active = True
                 proc_exe = proc.info.get("exe") or ""
                 if self.exe_path and proc_exe and str(Path(proc_exe).resolve()).lower() == self.exe_path:
                     detected_name = proc_name.strip()
-                    if detected_name and detected_name.lower() != self.process_name:
+                    if len(self.process_names) == 1 and detected_name and detected_name.lower() != self.process_name:
                         self.process_name = detected_name.lower()
+                        self.process_names = {self.process_name}
                         if self.on_process_name_detected:
                             self.on_process_name_detected(detected_name)
-                    return True
+                    is_running = True
             except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
                 continue
-        return False
+        return is_running, is_active
 
 
 class PlayTimeLogger:
@@ -787,6 +829,7 @@ class ConfigWizard:
         exe_frame.pack(fill=tk.X, pady=(0, 8))
         ttk.Entry(exe_frame, textvariable=self.exe_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Button(exe_frame, text=tr("browse"), anchor=tk.W, command=self.browse_exe).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(frame, text=tr("game_exe_note"), wraplength=560).pack(anchor=tk.W, pady=(0, 8))
 
         ttk.Label(frame, text=tr("process_name")).pack(anchor=tk.W)
         process_frame = ttk.Frame(frame)
@@ -999,7 +1042,9 @@ class ConfigWizard:
             "game_name": game_name,
             "game_exe": exe_path,
             "game_args": "",
+            "launch_unelevated": self.config.launch_unelevated if self.config is not None else False,
             "process_name": process_name,
+            "active_process_name": self.config.active_process_name if self.config is not None else "",
             "auto_close_on_game_exit": False,
             "obs": obs_config_to_dict(self.config.obs if self.config is not None else self.base_obs),
             "auto_open_links": auto_open_links,
@@ -1130,6 +1175,7 @@ class ResidentPlayCueApp:
         self.elapsed_before_run = 0.0
         self.run_started_at = 0.0
         self.paused = True
+        self.play_started = False
         self.log_saved = True
         self.watcher: GameProcessWatcher | None = None
         self.closed = False
@@ -1497,10 +1543,12 @@ class ResidentPlayCueApp:
 
         self.config = config
         self.obs_status_var.set(self.obs_controller.status)
+        start_on_active_process = bool(config.process_name)
         self.session_start = datetime.now()
         self.elapsed_before_run = 0.0
-        self.run_started_at = time.monotonic()
-        self.paused = False
+        self.run_started_at = 0.0 if start_on_active_process else time.monotonic()
+        self.paused = start_on_active_process
+        self.play_started = not start_on_active_process
         self.log_saved = False
         self.current_game_var.set(tr("playing", game_name=config.game_name))
         if self.reset_button is not None and not self.reset_button.winfo_ismapped():
@@ -1514,7 +1562,7 @@ class ResidentPlayCueApp:
         self._fit_window_to_screen(config.window_width, config.window_height)
 
         self.launcher.launch_game(config)
-        if config.obs.auto_start_recording_on_game_launch:
+        if config.obs.auto_start_recording_on_game_launch and self.play_started:
             self.obs_controller.start_recording()
             self._update_obs_status()
         self.launcher.open_links(config.auto_open_links)
@@ -1531,8 +1579,22 @@ class ResidentPlayCueApp:
             self.on_game_exit,
             exe_path=config.game_exe,
             on_process_name_detected=lambda process_name: self._update_config_process_name(config, process_name),
+            active_process_name=config.process_name,
+            on_active=self.on_game_active,
         )
         self._watch_process()
+
+    def on_game_active(self) -> None:
+        if self.config is None or self.play_started:
+            return
+        self.session_start = datetime.now()
+        self.elapsed_before_run = 0.0
+        self.run_started_at = time.monotonic()
+        self.paused = False
+        self.play_started = True
+        if self.config.obs.auto_start_recording_on_game_launch:
+            self.obs_controller.start_recording()
+            self._update_obs_status()
 
     def _update_config_process_name(self, config: GameConfig, process_name: str) -> None:
         try:
@@ -1585,7 +1647,7 @@ class ResidentPlayCueApp:
 
     def current_elapsed_seconds(self) -> int:
         elapsed = self.elapsed_before_run
-        if not self.paused:
+        if not self.paused and self.run_started_at > 0:
             elapsed += time.monotonic() - self.run_started_at
         return int(elapsed)
 
@@ -1617,13 +1679,15 @@ class ResidentPlayCueApp:
 
     def on_game_exit(self) -> None:
         self.stop_recording_for_game_exit()
-        self.save_log_once()
+        if self.play_started:
+            self.save_log_once()
         self.config = None
         self.watcher = None
         self.session_start = datetime.now()
         self.elapsed_before_run = 0.0
         self.run_started_at = 0.0
         self.paused = True
+        self.play_started = False
         self.log_saved = True
         self.current_game_var.set(tr("waiting"))
         self.pause_var.set(tr("start_recent"))
@@ -1888,7 +1952,8 @@ class ResidentPlayCueApp:
     def close(self) -> None:
         if self.watcher:
             self.watcher.stopped = True
-        self.save_log_once()
+        if self.play_started:
+            self.save_log_once()
         self.root.destroy()
 
     def save_log_once(self) -> None:
