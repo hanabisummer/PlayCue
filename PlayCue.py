@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import csv
 import ctypes
 import json
@@ -11,7 +12,7 @@ import sys
 import time
 import webbrowser
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import Tk, filedialog, messagebox, ttk
 import tkinter as tk
@@ -72,11 +73,15 @@ TEXT = {
         "startup": "PC起動時に自動起動",
         "terminal": "ターミナル表示",
         "language": "言語",
-        "summary": "集計",
+        "summary": "プレイ時間",
         "days": "{days}日",
         "recent_summary_title": "直近{days}日プレイ時間",
         "total": "累計",
-        "last_end_time": "前回終了時刻",
+        "last_end_time": "前回終了",
+        "calendar": "カレンダー",
+        "previous_month": "前月",
+        "next_month": "翌月",
+        "calendar_daily_title": "{date}のプレイ時間",
         "game_name": "ゲーム名",
         "game_exe_path": "ランチャーexe または ゲームexe の場所",
         "game_exe_note": "※ゲームランチャーが存在する場合は優先してランチャーの場所を入力。ない場合はゲームexeの場所を入力",
@@ -126,11 +131,15 @@ TEXT = {
         "startup": "Start with Windows",
         "terminal": "Show Terminal",
         "language": "Language",
-        "summary": "Summary",
+        "summary": "Play Time",
         "days": "{days} days",
         "recent_summary_title": "Last {days} Days Play Time",
         "total": "Total",
-        "last_end_time": "Last End Time",
+        "last_end_time": "Last End",
+        "calendar": "Calendar",
+        "previous_month": "Previous",
+        "next_month": "Next",
+        "calendar_daily_title": "Play Time on {date}",
         "game_name": "Game Name",
         "game_exe_path": "Launcher exe or Game exe Path",
         "game_exe_note": "If the game has a launcher, enter the launcher path first. Otherwise, enter the game exe path.",
@@ -1321,8 +1330,9 @@ class ResidentPlayCueApp:
         for days in (1, 7, 30):
             summary_menu.add_command(label=tr("days", days=days), command=lambda value=days: self.show_summary(value))
         summary_menu.add_command(label=tr("total"), command=self.show_total_summary)
+        summary_menu.add_command(label=tr("last_end_time"), command=self.show_last_end_times)
+        summary_menu.add_command(label=tr("calendar"), command=self.open_play_time_calendar)
         menu_bar.add_cascade(label=tr("summary"), menu=summary_menu)
-        menu_bar.add_command(label=tr("last_end_time"), command=self.show_last_end_times)
         self.root.config(menu=menu_bar)
 
     def set_language(self, language: str) -> None:
@@ -1759,6 +1769,87 @@ class ResidentPlayCueApp:
         ]
         messagebox.showinfo(tr("last_end_time"), "\n".join(lines))
 
+    def open_play_time_calendar(self) -> None:
+        selected_month = datetime.now().replace(day=1)
+        window = tk.Toplevel(self.root)
+        window.title(tr("calendar"))
+        window.geometry("420x560")
+
+        outer = ttk.Frame(window, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(outer)
+        header.pack(fill=tk.X)
+        month_var = tk.StringVar()
+        ttk.Button(header, text=tr("previous_month"), command=lambda: shift_month(-1)).pack(side=tk.LEFT)
+        ttk.Label(header, textvariable=month_var, anchor=tk.CENTER).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(header, text=tr("next_month"), command=lambda: shift_month(1)).pack(side=tk.RIGHT)
+
+        calendar_frame = ttk.Frame(outer)
+        calendar_frame.pack(fill=tk.X, pady=(8, 8))
+        result_frame = ttk.Frame(outer)
+        result_frame.pack(fill=tk.BOTH, expand=True)
+        result_text = tk.Text(result_frame, height=10, wrap=tk.WORD)
+        result_scrollbar = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=result_text.yview)
+        result_text.configure(yscrollcommand=result_scrollbar.set)
+        result_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        result_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        result_text.insert(tk.END, tr("not_recorded"))
+        result_text.configure(state=tk.DISABLED)
+
+        def shift_month(delta: int) -> None:
+            nonlocal selected_month
+            month = selected_month.month + delta
+            year = selected_month.year + ((month - 1) // 12)
+            month = ((month - 1) % 12) + 1
+            selected_month = selected_month.replace(year=year, month=month)
+            render_month()
+
+        def select_date(selected_date: date) -> None:
+            totals = self._play_seconds_by_game_on_date(selected_date)
+            if not totals:
+                update_result(f"{tr('calendar_daily_title', date=selected_date.isoformat())}\n{tr('not_recorded')}")
+                return
+            lines = [
+                f"{game_name}: {PlayTimeLogger.format_hhmmss(totals[game_name])}"
+                for game_name in self._summary_game_names(totals)
+                if game_name in totals
+            ]
+            update_result(f"{tr('calendar_daily_title', date=selected_date.isoformat())}\n" + "\n".join(lines))
+
+        def update_result(text: str) -> None:
+            result_text.configure(state=tk.NORMAL)
+            result_text.delete("1.0", tk.END)
+            result_text.insert(tk.END, text)
+            result_text.configure(state=tk.DISABLED)
+
+        def render_month() -> None:
+            for child in calendar_frame.winfo_children():
+                child.destroy()
+            month_var.set(selected_month.strftime("%Y-%m"))
+            today = date.today()
+            recorded_dates = self._play_recorded_dates()
+            weekday_labels = ["月", "火", "水", "木", "金", "土", "日"] if UI_LANGUAGE == "ja" else list(calendar.day_abbr)
+            for column, label in enumerate(weekday_labels):
+                ttk.Label(calendar_frame, text=label, anchor=tk.CENTER).grid(row=0, column=column, sticky="ew", padx=1, pady=1)
+                calendar_frame.columnconfigure(column, weight=1)
+            for row_index, week in enumerate(calendar.monthcalendar(selected_month.year, selected_month.month), start=1):
+                for column, day in enumerate(week):
+                    if day == 0:
+                        ttk.Label(calendar_frame, text="").grid(row=row_index, column=column, sticky="nsew", padx=1, pady=1)
+                        continue
+                    selected_date = date(selected_month.year, selected_month.month, day)
+                    state = tk.NORMAL if selected_date <= today and selected_date in recorded_dates else tk.DISABLED
+                    ttk.Button(
+                        calendar_frame,
+                        text=str(day),
+                        state=state,
+                        command=lambda value=selected_date: select_date(value),
+                    ).grid(row=row_index, column=column, sticky="nsew", padx=1, pady=1)
+                calendar_frame.rowconfigure(row_index, weight=1)
+
+        render_month()
+
     def _refresh_game_list(self) -> None:
         for config in self.configs:
             button_var = self.game_button_vars.get(config.game_name)
@@ -1862,6 +1953,27 @@ class ResidentPlayCueApp:
         if self.config is not None and (cutoff is None or self.session_start >= cutoff):
             totals[self.config.game_name] = totals.get(self.config.game_name, 0) + self.current_elapsed_seconds()
         return totals
+
+    def _play_seconds_by_game_on_date(self, selected_date: date) -> dict[str, int]:
+        totals: dict[str, int] = {}
+        for row in self._history_rows():
+            session_end = row["session_end"]
+            if isinstance(session_end, datetime) and session_end.date() == selected_date:
+                game_name = str(row["game_name"])
+                totals[game_name] = totals.get(game_name, 0) + int(row["elapsed_seconds"])
+        if self.config is not None and self.session_start.date() == selected_date:
+            totals[self.config.game_name] = totals.get(self.config.game_name, 0) + self.current_elapsed_seconds()
+        return totals
+
+    def _play_recorded_dates(self) -> set[date]:
+        dates: set[date] = set()
+        for row in self._history_rows():
+            session_end = row["session_end"]
+            if isinstance(session_end, datetime):
+                dates.add(session_end.date())
+        if self.config is not None:
+            dates.add(self.session_start.date())
+        return dates
 
     def _summary_game_names(self, values: dict[str, object] | None = None) -> list[str]:
         names: list[str] = []
