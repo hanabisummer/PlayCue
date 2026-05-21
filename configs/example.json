@@ -20,6 +20,42 @@
     "auto_start_recording_on_game_launch": false,
     "auto_stop_recording_on_game_exit": true
   },
+  "login_bonus": {
+    "enabled": false,
+    "reset_time": "05:00",
+    "game_screen": {
+      "enabled": false,
+      "window_title": "Sample Game",
+      "url": "",
+      "claimed_patterns": [
+        "Claimed",
+        "Received"
+      ],
+      "unclaimed_patterns": [
+        "Claim",
+        "Receive"
+      ],
+      "timeout_seconds": 300,
+      "retry_interval_seconds": 5,
+      "ocr_languages": "jpn+eng"
+    },
+    "web": {
+      "enabled": false,
+      "window_title": "",
+      "url": "https://example.com/login-bonus",
+      "claimed_patterns": [
+        "Claimed",
+        "Received"
+      ],
+      "unclaimed_patterns": [
+        "Claim",
+        "Receive"
+      ],
+      "timeout_seconds": 30,
+      "retry_interval_seconds": 5,
+      "ocr_languages": "jpn+eng"
+    }
+  },
   "auto_open_links": [
     {
       "name": "Official Site",

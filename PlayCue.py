@@ -3,16 +3,22 @@ from __future__ import annotations
 import calendar
 import csv
 import ctypes
+import ctypes.wintypes
 import json
 import os
+import queue
 import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
+import urllib.request
 import webbrowser
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from tkinter import Tk, filedialog, messagebox, ttk
 import tkinter as tk
@@ -24,10 +30,16 @@ except ImportError:  # pragma: no cover - optional tray support
     pystray = None
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageGrab
 except ImportError:  # pragma: no cover - optional tray support
     Image = None
     ImageDraw = None
+    ImageGrab = None
+
+try:
+    import pytesseract
+except ImportError:  # pragma: no cover - optional OCR support
+    pytesseract = None
 
 try:
     import psutil
@@ -44,11 +56,25 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = BASE_DIR / "configs"
 LOG_FILE = BASE_DIR / "logs" / "play_history.csv"
 SUMMARY_FILE = BASE_DIR / "logs" / "play_time_summary.csv"
+LOGIN_BONUS_LOG_FILE = BASE_DIR / "logs" / "login_bonus_history.csv"
 ELEVATED_FLAG = "--elevated"
 SW_HIDE = 0
 SW_SHOW = 5
 STARTUP_TASK_NAME = "PlayCue"
 UI_LANGUAGE = "ja"
+
+THEME = {
+    "bg": "#10141f",
+    "panel": "#171d2b",
+    "panel_alt": "#20283a",
+    "text": "#edf3ff",
+    "muted": "#9aa9c4",
+    "accent": "#21d4fd",
+    "accent_active": "#55e6ff",
+    "danger": "#ff4d6d",
+    "danger_active": "#ff7891",
+    "border": "#31405c",
+}
 
 
 TEXT = {
@@ -61,6 +87,18 @@ TEXT = {
         "start_recording": "録画開始",
         "stop_recording": "録画停止",
         "links": "リンク",
+        "login_bonus": "ログインボーナス",
+        "login_bonus_status": "{game}: {source} {status}",
+        "login_bonus_game_check": "ゲーム画面を判定",
+        "login_bonus_web_check": "Webを開いて判定",
+        "login_bonus_manual_claimed": "取得済みにする",
+        "login_bonus_manual_unclaimed": "未取得にする",
+        "login_bonus_game_source": "ゲーム画面",
+        "login_bonus_web_source": "Web",
+        "login_bonus_disabled": "ログインボーナス設定なし",
+        "login_bonus_claimed": "取得済み",
+        "login_bonus_unclaimed": "未取得",
+        "login_bonus_unknown": "未判定",
         "start_recent": "直近にプレイしたゲームを起動",
         "reset_time": "現在のプレイ時間をリセット",
         "always_on_top": "最前面: {state}",
@@ -108,6 +146,13 @@ TEXT = {
         "show": "表示",
         "exit": "終了",
         "not_recorded": "記録なし",
+        "find_game_sites": "攻略サイト自動検索",
+        "searching_game_sites": "検索中...",
+        "game_sites_title": "攻略サイト候補",
+        "no_game_name_for_search": "ゲーム名を入力してください。",
+        "no_game_sites_found": "追加できる候補が見つかりませんでした。",
+        "add_selected_sites": "選択したリンクを追加",
+        "game_site_search_failed": "攻略サイト候補を取得できませんでした:\n{error}",
         "csv": "CSV",
     },
     "en": {
@@ -119,6 +164,18 @@ TEXT = {
         "start_recording": "Start Recording",
         "stop_recording": "Stop Recording",
         "links": "Links",
+        "login_bonus": "Login Bonus",
+        "login_bonus_status": "{game}: {source} {status}",
+        "login_bonus_game_check": "Check Game Screen",
+        "login_bonus_web_check": "Open Web and Check",
+        "login_bonus_manual_claimed": "Mark Claimed",
+        "login_bonus_manual_unclaimed": "Mark Unclaimed",
+        "login_bonus_game_source": "Game Screen",
+        "login_bonus_web_source": "Web",
+        "login_bonus_disabled": "No login bonus settings",
+        "login_bonus_claimed": "Claimed",
+        "login_bonus_unclaimed": "Unclaimed",
+        "login_bonus_unknown": "Unknown",
         "start_recent": "Start Last Played Game",
         "reset_time": "Reset Current Play Time",
         "always_on_top": "Always On Top: {state}",
@@ -150,6 +207,13 @@ TEXT = {
         "url": "URL",
         "auto_launch": "Auto Launch",
         "add_link": " Add Link",
+        "find_game_sites": "Find Game Sites",
+        "searching_game_sites": "Searching...",
+        "game_sites_title": "Game Site Candidates",
+        "no_game_name_for_search": "Enter a game name first.",
+        "no_game_sites_found": "No new candidates were found.",
+        "add_selected_sites": "Add Selected Links",
+        "game_site_search_failed": "Could not fetch game site candidates:\n{error}",
         "remove_link": "Delete",
         "create": " Create",
         "update": " Update",
@@ -201,6 +265,208 @@ class LinkItem:
     url: str
 
 
+class SearchResultParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[tuple[str, str]] = []
+        self._href = ""
+        self._text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        href = dict(attrs).get("href") or ""
+        if not href:
+            return
+        self._href = href
+        self._text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a" or not self._href:
+            return
+        title = " ".join("".join(self._text_parts).split())
+        if title:
+            self.results.append((title, self._href))
+        self._href = ""
+        self._text_parts = []
+
+
+class GameSiteSearcher:
+    SEARCH_URL = "https://duckduckgo.com/html/"
+    QUERY_SUFFIXES = ("攻略", "wiki", "guide")
+    EXCLUDED_DOMAINS = (
+        "duckduckgo.com",
+        "google.com",
+        "bing.com",
+        "yahoo.co.jp",
+        "youtube.com",
+        "youtu.be",
+        "x.com",
+        "twitter.com",
+        "facebook.com",
+        "instagram.com",
+    )
+    PREFERRED_DOMAINS = (
+        "pcgamingwiki.com",
+        "steamcommunity.com",
+        "store.steampowered.com",
+        "wikiwiki.jp",
+        "w.atwiki.jp",
+        "fandom.com",
+        "game8.jp",
+        "gamewith.jp",
+        "altema.jp",
+        "appmedia.jp",
+        "kamigame.jp",
+    )
+
+    @classmethod
+    def search(cls, game_title: str, max_results: int = 5) -> tuple[LinkItem, ...]:
+        collected: list[tuple[int, int, LinkItem]] = []
+        seen: set[str] = set()
+        seen_sites: set[str] = set()
+        order = 0
+        for suffix in cls.QUERY_SUFFIXES:
+            html = cls._fetch_html(f"{game_title} {suffix}")
+            for title, href in cls._parse_html(html):
+                link = cls._to_link(title, href)
+                if link is None:
+                    continue
+                key = cls.normalized_url_key(link.url)
+                if key in seen:
+                    continue
+                site_key = cls.site_key(link.url)
+                if site_key in seen_sites:
+                    continue
+                seen.add(key)
+                seen_sites.add(site_key)
+                collected.append((cls._score(link), order, link))
+                order += 1
+        collected.sort(key=lambda item: (-item[0], item[1]))
+        return tuple(item[2] for item in collected[:max_results])
+
+    @classmethod
+    def links_from_html(cls, html: str, max_results: int = 5) -> tuple[LinkItem, ...]:
+        collected: list[tuple[int, int, LinkItem]] = []
+        seen: set[str] = set()
+        seen_sites: set[str] = set()
+        for order, (title, href) in enumerate(cls._parse_html(html)):
+            link = cls._to_link(title, href)
+            if link is None:
+                continue
+            key = cls.normalized_url_key(link.url)
+            if key in seen:
+                continue
+            site_key = cls.site_key(link.url)
+            if site_key in seen_sites:
+                continue
+            seen.add(key)
+            seen_sites.add(site_key)
+            collected.append((cls._score(link), order, link))
+        collected.sort(key=lambda item: (-item[0], item[1]))
+        return tuple(item[2] for item in collected[:max_results])
+
+    @classmethod
+    def normalized_url_key(cls, url: str) -> str:
+        parsed = urllib.parse.urlparse(url.strip())
+        netloc = parsed.netloc.lower()
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+        path = parsed.path.rstrip("/")
+        return urllib.parse.urlunparse((parsed.scheme.lower(), netloc, path, "", parsed.query, ""))
+
+    @staticmethod
+    def site_key(url: str) -> str:
+        netloc = urllib.parse.urlparse(url.strip()).netloc.lower()
+        return netloc[4:] if netloc.startswith("www.") else netloc
+
+    @classmethod
+    def _fetch_html(cls, query: str) -> str:
+        params = urllib.parse.urlencode({"q": query})
+        request = urllib.request.Request(
+            f"{cls.SEARCH_URL}?{params}",
+            headers={"User-Agent": "Mozilla/5.0 PlayCue"},
+        )
+        with urllib.request.urlopen(request, timeout=8) as response:
+            return response.read().decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _parse_html(html: str) -> list[tuple[str, str]]:
+        parser = SearchResultParser()
+        parser.feed(html)
+        return parser.results
+
+    @classmethod
+    def _to_link(cls, title: str, href: str) -> LinkItem | None:
+        url = cls._unwrap_url(href)
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        domain = parsed.netloc.lower()
+        if any(domain == excluded or domain.endswith(f".{excluded}") for excluded in cls.EXCLUDED_DOMAINS):
+            return None
+        name = cls._clean_title(title)
+        if not name:
+            return None
+        return LinkItem(name=name, url=urllib.parse.urlunparse(parsed._replace(fragment="")))
+
+    @staticmethod
+    def _unwrap_url(href: str) -> str:
+        if href.startswith("//"):
+            href = f"https:{href}"
+        elif href.startswith("/"):
+            href = f"https://duckduckgo.com{href}"
+        parsed = urllib.parse.urlparse(href)
+        if parsed.netloc.lower().endswith("duckduckgo.com"):
+            query = urllib.parse.parse_qs(parsed.query)
+            if query.get("uddg"):
+                return query["uddg"][0]
+        return href
+
+    @staticmethod
+    def _clean_title(title: str) -> str:
+        title = re.sub(r"\s+", " ", title).strip()
+        return title[:80]
+
+    @classmethod
+    def _score(cls, link: LinkItem) -> int:
+        parsed = urllib.parse.urlparse(link.url)
+        domain = parsed.netloc.lower()
+        score = 0
+        for index, preferred in enumerate(cls.PREFERRED_DOMAINS):
+            if domain == preferred or domain.endswith(f".{preferred}"):
+                score += 1000 - index
+                break
+        text = f"{link.name} {link.url}".lower()
+        if any(keyword in text for keyword in ("攻略", "wiki", "guide", "walkthrough")):
+            score += 100
+        return score
+
+
+@dataclass(frozen=True)
+class LoginBonusSourceConfig:
+    enabled: bool = False
+    window_title: str = ""
+    url: str = ""
+    claimed_patterns: tuple[str, ...] = ()
+    unclaimed_patterns: tuple[str, ...] = ()
+    timeout_seconds: int = 30
+    retry_interval_seconds: int = 5
+    ocr_languages: str = "jpn+eng"
+
+
+@dataclass(frozen=True)
+class LoginBonusConfig:
+    enabled: bool = False
+    reset_time: str = "05:00"
+    game_screen: LoginBonusSourceConfig = LoginBonusSourceConfig(timeout_seconds=300)
+    web: LoginBonusSourceConfig = LoginBonusSourceConfig(timeout_seconds=30)
+
+
 @dataclass(frozen=True)
 class OBSConfig:
     enabled: bool = False
@@ -229,6 +495,7 @@ class GameConfig:
     active_process_name: str = ""
     auto_close_on_game_exit: bool = False
     obs: OBSConfig = OBSConfig()
+    login_bonus: LoginBonusConfig = LoginBonusConfig()
     auto_open_links: tuple[LinkItem, ...] = ()
     buttons: tuple[LinkItem, ...] = ()
     always_on_top: bool = True
@@ -260,6 +527,7 @@ class ConfigLoader:
             active_process_name=str(data.get("active_process_name", "")).strip(),
             auto_close_on_game_exit=bool(data.get("auto_close_on_game_exit", False)),
             obs=ConfigLoader._parse_obs(data.get("obs", {})),
+            login_bonus=ConfigLoader._parse_login_bonus(data.get("login_bonus", {})),
             auto_open_links=ConfigLoader._parse_links(data.get("auto_open_links", [])),
             buttons=ConfigLoader._parse_links(data.get("buttons", [])),
             always_on_top=bool(data.get("always_on_top", True)),
@@ -310,6 +578,77 @@ class ConfigLoader:
             auto_start_recording_on_game_launch=bool(value.get("auto_start_recording_on_game_launch", False)),
             auto_stop_recording_on_game_exit=bool(value.get("auto_stop_recording_on_game_exit", False)),
         )
+
+    @staticmethod
+    def _parse_login_bonus(value: object) -> LoginBonusConfig:
+        if not isinstance(value, dict):
+            return LoginBonusConfig()
+        reset_time = ConfigLoader._parse_reset_time(value.get("reset_time", "05:00"))
+        default_claimed = ConfigLoader._parse_patterns(value.get("claimed_patterns", []))
+        default_unclaimed = ConfigLoader._parse_patterns(value.get("unclaimed_patterns", []))
+        return LoginBonusConfig(
+            enabled=bool(value.get("enabled", False)),
+            reset_time=reset_time,
+            game_screen=ConfigLoader._parse_login_bonus_source(
+                value.get("game_screen", {}),
+                default_claimed,
+                default_unclaimed,
+                300,
+            ),
+            web=ConfigLoader._parse_login_bonus_source(
+                value.get("web", {}),
+                default_claimed,
+                default_unclaimed,
+                30,
+            ),
+        )
+
+    @staticmethod
+    def _parse_login_bonus_source(
+        value: object,
+        default_claimed: tuple[str, ...],
+        default_unclaimed: tuple[str, ...],
+        default_timeout: int,
+    ) -> LoginBonusSourceConfig:
+        if not isinstance(value, dict):
+            value = {}
+        claimed_patterns = ConfigLoader._parse_patterns(value.get("claimed_patterns", [])) or default_claimed
+        unclaimed_patterns = ConfigLoader._parse_patterns(value.get("unclaimed_patterns", [])) or default_unclaimed
+        return LoginBonusSourceConfig(
+            enabled=bool(value.get("enabled", False)),
+            window_title=str(value.get("window_title", "")).strip(),
+            url=str(value.get("url", "")).strip(),
+            claimed_patterns=claimed_patterns,
+            unclaimed_patterns=unclaimed_patterns,
+            timeout_seconds=ConfigLoader._positive_int(value.get("timeout_seconds", default_timeout), default_timeout),
+            retry_interval_seconds=ConfigLoader._positive_int(value.get("retry_interval_seconds", 5), 5),
+            ocr_languages=str(value.get("ocr_languages", "jpn+eng")).strip() or "jpn+eng",
+        )
+
+    @staticmethod
+    def _parse_patterns(value: object) -> tuple[str, ...]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return ()
+        patterns: list[str] = []
+        for item in value:
+            pattern = str(item).strip()
+            if pattern:
+                patterns.append(pattern)
+        return tuple(patterns)
+
+    @staticmethod
+    def _parse_reset_time(value: object) -> str:
+        text = str(value).strip()
+        if not re.fullmatch(r"\d{1,2}:\d{2}", text):
+            return "05:00"
+        hour_text, minute_text = text.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+        return "05:00"
 
     @staticmethod
     def _clamp_float(value: object, minimum: float, maximum: float) -> float:
@@ -373,14 +712,20 @@ class OBSController:
         if config.enabled:
             self.status = "OBS: 未起動"
 
-    def prepare(self, launch_as_admin: bool = False, show_window: bool = False) -> None:
+    def prepare(
+        self,
+        launch_as_admin: bool = False,
+        show_window: bool = False,
+        show_errors: bool = True,
+        connect_timeout_seconds: int | None = None,
+    ) -> None:
         if not self.config.enabled:
             return
         if self.config.auto_launch:
-            self.launch_obs(launch_as_admin=launch_as_admin, show_window=show_window)
-        self.connect()
+            self.launch_obs(launch_as_admin=launch_as_admin, show_window=show_window, show_errors=show_errors)
+        self.connect(show_errors=show_errors, timeout_seconds=connect_timeout_seconds)
 
-    def launch_obs(self, launch_as_admin: bool = False, show_window: bool = False) -> None:
+    def launch_obs(self, launch_as_admin: bool = False, show_window: bool = False, show_errors: bool = True) -> None:
         if self._is_obs_running():
             self.status = "OBS: 起動済み"
             return
@@ -415,7 +760,7 @@ class OBSController:
         except OSError as exc:
             self._set_error(f"OBSの起動に失敗しました:\n{exc}")
 
-    def connect(self) -> bool:
+    def connect(self, show_errors: bool = True, timeout_seconds: int | None = None) -> bool:
         if not self.config.enabled:
             return False
         if ReqClient is None:
@@ -423,7 +768,8 @@ class OBSController:
             return False
 
         self.status = "OBS: 接続待ち"
-        deadline = time.monotonic() + self.config.connect_timeout_seconds
+        timeout = self.config.connect_timeout_seconds if timeout_seconds is None else max(1, timeout_seconds)
+        deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() <= deadline:
             try:
@@ -573,7 +919,8 @@ class OBSController:
 
     def _set_error(self, message: str) -> None:
         self.status = "OBS: エラー"
-        messagebox.showerror("OBSエラー", message)
+        if threading.current_thread() is threading.main_thread():
+            messagebox.showerror('OBSエラー', message)
 
 
 class GameProcessWatcher:
@@ -622,6 +969,15 @@ class GameProcessWatcher:
                 self.on_active()
 
         if self.active_process_names and not self.seen_active_process:
+            if is_running:
+                self.seen_process = True
+                self.missing_count = 0
+                return
+            if self.seen_process:
+                self.missing_count += 1
+                if self.missing_count >= self.missing_threshold:
+                    self.stopped = True
+                    self.on_exit()
             return
 
         if self.active_process_names and self.seen_active_process:
@@ -655,7 +1011,12 @@ class GameProcessWatcher:
                 proc_exe = proc.info.get("exe") or ""
                 if self.exe_path and proc_exe and str(Path(proc_exe).resolve()).lower() == self.exe_path:
                     detected_name = proc_name.strip()
-                    if len(self.process_names) == 1 and detected_name and detected_name.lower() != self.process_name:
+                    if (
+                        not self.active_process_names
+                        and len(self.process_names) == 1
+                        and detected_name
+                        and detected_name.lower() != self.process_name
+                    ):
                         self.process_name = detected_name.lower()
                         self.process_names = {self.process_name}
                         if self.on_process_name_detected:
@@ -707,6 +1068,177 @@ class PlayTimeLogger:
             )
 
 
+class LoginBonusLogger:
+    HEADER = [
+        "checked_at",
+        "bonus_date",
+        "game_name",
+        "source",
+        "status",
+        "method",
+        "evidence",
+        "manual",
+        "config_file",
+    ]
+
+    @staticmethod
+    def bonus_date(now: datetime, reset_time: str) -> date:
+        hour_text, minute_text = ConfigLoader._parse_reset_time(reset_time).split(":", 1)
+        reset_at = now.replace(hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0)
+        if now < reset_at:
+            return now.date() - timedelta(days=1)
+        return now.date()
+
+    def save(
+        self,
+        config: GameConfig,
+        source: str,
+        status: str,
+        evidence: str = "",
+        method: str = "manual",
+        manual: bool = False,
+    ) -> None:
+        if status not in {"claimed", "unclaimed"}:
+            return
+        LOGIN_BONUS_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        exists = LOGIN_BONUS_LOG_FILE.exists()
+        now = datetime.now()
+        bonus_date = self.bonus_date(now, config.login_bonus.reset_time)
+        with LOGIN_BONUS_LOG_FILE.open("a", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            if not exists:
+                writer.writerow(self.HEADER)
+            writer.writerow(
+                [
+                    now.strftime("%Y-%m-%d %H:%M:%S"),
+                    bonus_date.isoformat(),
+                    config.game_name,
+                    source,
+                    status,
+                    method,
+                    evidence[:120],
+                    "1" if manual else "0",
+                    str(config.config_file.relative_to(BASE_DIR))
+                    if config.config_file.is_relative_to(BASE_DIR)
+                    else str(config.config_file),
+                ]
+            )
+
+    def latest(self, config: GameConfig, source: str) -> dict[str, str] | None:
+        if not LOGIN_BONUS_LOG_FILE.exists():
+            return None
+        today_bonus_date = self.bonus_date(datetime.now(), config.login_bonus.reset_time).isoformat()
+        latest_row: dict[str, str] | None = None
+        try:
+            with LOGIN_BONUS_LOG_FILE.open("r", encoding="utf-8-sig", newline="") as f:
+                for row in csv.DictReader(f):
+                    if (
+                        (row.get("game_name") or "") == config.game_name
+                        and (row.get("source") or "") == source
+                        and (row.get("bonus_date") or "") == today_bonus_date
+                    ):
+                        latest_row = dict(row)
+        except OSError:
+            return None
+        return latest_row
+
+
+class LoginBonusChecker:
+    _ocr_available: bool | None = None
+
+    def check(self, config: GameConfig, source_name: str) -> tuple[str, str, str]:
+        source = self._source_config(config, source_name)
+        if source is None or not config.login_bonus.enabled or not source.enabled:
+            return "unknown", "", "disabled"
+        text, method = self._read_source_text(source)
+        if not text:
+            return "unknown", "", method
+        return self._match_text(text, source)
+
+    @staticmethod
+    def _source_config(config: GameConfig, source_name: str) -> LoginBonusSourceConfig | None:
+        if source_name == "game_screen":
+            return config.login_bonus.game_screen
+        if source_name == "web":
+            return config.login_bonus.web
+        return None
+
+    @staticmethod
+    def _match_text(text: str, source: LoginBonusSourceConfig) -> tuple[str, str, str]:
+        lowered = text.lower()
+        for pattern in source.claimed_patterns:
+            if pattern.lower() in lowered:
+                return "claimed", pattern, "ocr"
+        for pattern in source.unclaimed_patterns:
+            if pattern.lower() in lowered:
+                return "unclaimed", pattern, "ocr"
+        return "unknown", text[:120], "ocr"
+
+    def _read_source_text(self, source: LoginBonusSourceConfig) -> tuple[str, str]:
+        if not self.is_ocr_available():
+            return "", "ocr_unavailable"
+        bbox = self._window_bbox(source.window_title)
+        if bbox is None:
+            return "", "window_not_found"
+        try:
+            image = ImageGrab.grab(bbox=bbox)
+            text = pytesseract.image_to_string(image, lang=source.ocr_languages)
+        except Exception:
+            return "", "ocr_error"
+        return text, "ocr"
+
+    @classmethod
+    def is_ocr_available(cls) -> bool:
+        if pytesseract is None or ImageGrab is None:
+            return False
+        if cls._ocr_available is not None:
+            return cls._ocr_available
+        try:
+            pytesseract.get_tesseract_version()
+        except Exception:
+            cls._ocr_available = False
+        else:
+            cls._ocr_available = True
+        return cls._ocr_available
+
+    def _window_bbox(self, window_title: str) -> tuple[int, int, int, int] | None:
+        if os.name != "nt":
+            return None
+        hwnd = self._find_window(window_title)
+        if not hwnd:
+            return None
+        rect = ctypes.wintypes.RECT()
+        if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return None
+        if rect.right <= rect.left or rect.bottom <= rect.top:
+            return None
+        return rect.left, rect.top, rect.right, rect.bottom
+
+    def _find_window(self, window_title: str) -> int:
+        user32 = ctypes.windll.user32
+        if not window_title:
+            return int(user32.GetForegroundWindow())
+        needle = window_title.lower()
+        matches: list[int] = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def enum_proc(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            if needle in buffer.value.lower():
+                matches.append(int(hwnd))
+                return False
+            return True
+
+        user32.EnumWindows(enum_proc, 0)
+        return matches[0] if matches else 0
+
+
 def obs_config_to_dict(config: OBSConfig) -> dict[str, object]:
     return {
         "enabled": config.enabled,
@@ -722,6 +1254,28 @@ def obs_config_to_dict(config: OBSConfig) -> dict[str, object]:
         "connect_retry_interval_seconds": config.connect_retry_interval_seconds,
         "auto_start_recording_on_game_launch": config.auto_start_recording_on_game_launch,
         "auto_stop_recording_on_game_exit": config.auto_stop_recording_on_game_exit,
+    }
+
+
+def login_bonus_config_to_dict(config: LoginBonusConfig) -> dict[str, object]:
+    return {
+        "enabled": config.enabled,
+        "reset_time": config.reset_time,
+        "game_screen": login_bonus_source_to_dict(config.game_screen),
+        "web": login_bonus_source_to_dict(config.web),
+    }
+
+
+def login_bonus_source_to_dict(config: LoginBonusSourceConfig) -> dict[str, object]:
+    return {
+        "enabled": config.enabled,
+        "window_title": config.window_title,
+        "url": config.url,
+        "claimed_patterns": list(config.claimed_patterns),
+        "unclaimed_patterns": list(config.unclaimed_patterns),
+        "timeout_seconds": config.timeout_seconds,
+        "retry_interval_seconds": config.retry_interval_seconds,
+        "ocr_languages": config.ocr_languages,
     }
 
 
@@ -822,6 +1376,7 @@ class ConfigWizard:
         self.links_frame: ttk.Frame | None = None
         self.links_body: ttk.Frame | None = None
         self.links_canvas: tk.Canvas | None = None
+        self.site_search_button: tk.Button | None = None
         self._build_ui()
         self._load_config(config)
         self._fit_window_to_screen(600, 520)
@@ -867,6 +1422,13 @@ class ConfigWizard:
 
         button_frame = ttk.Frame(frame)
         button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+        self.site_search_button = tk.Button(
+            button_frame,
+            text=tr("find_game_sites"),
+            anchor=tk.W,
+            command=self.find_game_sites,
+        )
+        self.site_search_button.pack(fill=tk.X, pady=(0, 8))
         tk.Button(button_frame, text=tr("add_link"), anchor=tk.W, command=lambda: self.add_link_row()).pack(
             fill=tk.X, pady=(0, 8)
         )
@@ -922,6 +1484,119 @@ class ConfigWizard:
         if len(self.link_rows) > self.MAX_EXPANDED_LINK_ROWS:
             self.links_canvas.yview_moveto(1.0)
         self._fit_window_to_screen(max(600, self.window.winfo_width()), self.window.winfo_height())
+
+    def find_game_sites(self) -> None:
+        game_title = self.game_name_var.get().strip()
+        if not game_title:
+            messagebox.showwarning(tr("game_sites_title"), tr("no_game_name_for_search"), parent=self.window)
+            return
+        if self.site_search_button is not None:
+            self.site_search_button.configure(state=tk.DISABLED, text=tr("searching_game_sites"))
+        result_queue: queue.Queue[tuple[tuple[LinkItem, ...], Exception | None]] = queue.Queue()
+
+        def worker() -> None:
+            try:
+                links = GameSiteSearcher.search(game_title)
+                result_queue.put((links, None))
+            except Exception as exc:
+                result_queue.put(((), exc))
+
+        def poll_result() -> None:
+            try:
+                links, error = result_queue.get_nowait()
+            except queue.Empty:
+                if self.window.winfo_exists():
+                    self.window.after(100, poll_result)
+                return
+            self._finish_game_site_search(links, error)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.window.after(100, poll_result)
+
+    def _finish_game_site_search(self, links: tuple[LinkItem, ...], error: Exception | None) -> None:
+        if self.site_search_button is not None:
+            self.site_search_button.configure(state=tk.NORMAL, text=tr("find_game_sites"))
+        if error is not None:
+            messagebox.showerror(
+                tr("game_sites_title"),
+                tr("game_site_search_failed", error=str(error)),
+                parent=self.window,
+            )
+            return
+        existing_urls = self._existing_link_url_keys()
+        existing_sites = self._existing_link_site_keys()
+        candidates = tuple(
+            link
+            for link in links
+            if GameSiteSearcher.normalized_url_key(link.url) not in existing_urls
+            and GameSiteSearcher.site_key(link.url) not in existing_sites
+        )
+        if not candidates:
+            messagebox.showinfo(tr("game_sites_title"), tr("no_game_sites_found"), parent=self.window)
+            return
+        self._show_game_site_candidates(candidates)
+
+    def _existing_link_url_keys(self) -> set[str]:
+        urls: set[str] = set()
+        for _name_var, url_var, _auto_launch_var, _row in self.link_rows:
+            url = url_var.get().strip()
+            if url:
+                urls.add(GameSiteSearcher.normalized_url_key(url))
+        return urls
+
+    def _existing_link_site_keys(self) -> set[str]:
+        sites: set[str] = set()
+        for _name_var, url_var, _auto_launch_var, _row in self.link_rows:
+            url = url_var.get().strip()
+            if url:
+                sites.add(GameSiteSearcher.site_key(url))
+        return sites
+
+    def _show_game_site_candidates(self, links: tuple[LinkItem, ...]) -> None:
+        dialog = tk.Toplevel(self.window)
+        dialog.title(tr("game_sites_title"))
+        dialog.transient(self.window)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+        choices: list[tuple[tk.BooleanVar, LinkItem]] = []
+        for link in links:
+            checked = tk.BooleanVar(value=True)
+            choices.append((checked, link))
+            row = ttk.Frame(frame)
+            row.pack(fill=tk.X, pady=(0, 8))
+            tk.Checkbutton(row, variable=checked, onvalue=True, offvalue=False).pack(side=tk.LEFT)
+            text = f"{link.name}\n{link.url}"
+            ttk.Label(row, text=text, wraplength=520).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def add_selected() -> None:
+            added = False
+            existing_urls = self._existing_link_url_keys()
+            existing_sites = self._existing_link_site_keys()
+            for checked, link in choices:
+                key = GameSiteSearcher.normalized_url_key(link.url)
+                site_key = GameSiteSearcher.site_key(link.url)
+                if checked.get() and key not in existing_urls and site_key not in existing_sites:
+                    self.add_link_row(link.name, link.url)
+                    existing_urls.add(key)
+                    existing_sites.add(site_key)
+                    added = True
+            dialog.destroy()
+            if not added:
+                messagebox.showinfo(tr("game_sites_title"), tr("no_game_sites_found"), parent=self.window)
+
+        tk.Button(frame, text=tr("add_selected_sites"), anchor=tk.W, command=add_selected).pack(fill=tk.X)
+        self._fit_child_window_to_screen(dialog, 600, 360)
+
+    def _fit_child_window_to_screen(self, window: tk.Toplevel, width: int, height: int) -> None:
+        window.update_idletasks()
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        fitted_width = min(max(360, width, window.winfo_reqwidth()), screen_width)
+        fitted_height = min(max(220, height, window.winfo_reqheight()), max(220, screen_height - 80))
+        x = max(0, min(self.window.winfo_rootx() + 20, screen_width - fitted_width))
+        y = max(0, min(self.window.winfo_rooty() + 20, screen_height - fitted_height))
+        window.geometry(f"{fitted_width}x{fitted_height}+{x}+{y}")
 
     def remove_link_row(self, row: ttk.Frame) -> None:
         self.link_rows = [item for item in self.link_rows if item[3] is not row]
@@ -1056,6 +1731,9 @@ class ConfigWizard:
             "active_process_name": self.config.active_process_name if self.config is not None else "",
             "auto_close_on_game_exit": False,
             "obs": obs_config_to_dict(self.config.obs if self.config is not None else self.base_obs),
+            "login_bonus": login_bonus_config_to_dict(
+                self.config.login_bonus if self.config is not None else LoginBonusConfig()
+            ),
             "auto_open_links": auto_open_links,
             "buttons": links,
             "always_on_top": self.config.always_on_top if self.config is not None else True,
@@ -1180,6 +1858,9 @@ class ResidentPlayCueApp:
         self.obs_controller = OBSController(configs[0].obs)
         self.launcher = GameLauncher()
         self.logger = PlayTimeLogger()
+        self.login_bonus_logger = LoginBonusLogger()
+        self.login_bonus_checker = LoginBonusChecker()
+        self.obs_prepare_running = False
         self.session_start = datetime.now()
         self.elapsed_before_run = 0.0
         self.run_started_at = 0.0
@@ -1189,6 +1870,7 @@ class ResidentPlayCueApp:
         self.watcher: GameProcessWatcher | None = None
         self.closed = False
         self.tray_icon = None
+        self.tray_icon_creating = False
         self.tray_available = pystray is not None and Image is not None and ImageDraw is not None
         first_config = configs[0]
 
@@ -1196,6 +1878,7 @@ class ResidentPlayCueApp:
         self.time_var = tk.StringVar(value=tr("play_time", time="00:00:00"))
         self.current_game_var = tk.StringVar(value=tr("waiting"))
         self.obs_status_var = tk.StringVar(value=obs_status_text(self.obs_controller.status))
+        self.login_bonus_status_var = tk.StringVar(value="")
         self.pause_var = tk.StringVar(value=tr("start_recent"))
         self.topmost_var = tk.StringVar()
         self.ui_title_label: ttk.Label | None = None
@@ -1210,6 +1893,13 @@ class ResidentPlayCueApp:
         self.link_frame: ttk.LabelFrame | None = None
         self.link_canvas: tk.Canvas | None = None
         self.link_body: ttk.Frame | None = None
+        self.login_bonus_frame: ttk.LabelFrame | None = None
+        self.login_bonus_game_check_button: ttk.Button | None = None
+        self.login_bonus_game_claimed_button: ttk.Button | None = None
+        self.login_bonus_game_unclaimed_button: ttk.Button | None = None
+        self.login_bonus_web_check_button: ttk.Button | None = None
+        self.login_bonus_web_claimed_button: ttk.Button | None = None
+        self.login_bonus_web_unclaimed_button: ttk.Button | None = None
         self.obs_controls: ttk.Frame | None = None
         self.recording_start_button: ttk.Button | None = None
         self.recording_stop_button: ttk.Button | None = None
@@ -1218,9 +1908,13 @@ class ResidentPlayCueApp:
         default_font = tkfont.nametofont("TkDefaultFont")
         self.ui_font = default_font
         self.title_font = default_font.copy()
-        self.title_font.configure(weight="bold")
-        self.button_font = tkfont.nametofont("TkTextFont")
+        self.title_font.configure(size=12, weight="bold")
+        self.timer_font = default_font.copy()
+        self.timer_font.configure(size=16, weight="bold")
+        self.button_font = tkfont.nametofont("TkTextFont").copy()
+        self.button_font.configure(weight="bold")
 
+        self._configure_theme()
         self._build_ui(first_config)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Unmap>", self._on_unmap)
@@ -1232,23 +1926,60 @@ class ResidentPlayCueApp:
         self._monitor_obs_status()
         self.root.after(100, self.prepare_obs_on_startup)
 
+    def _configure_theme(self) -> None:
+        self.root.configure(bg=THEME["bg"])
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(".", background=THEME["bg"], foreground=THEME["text"], fieldbackground=THEME["panel"])
+        style.configure("TFrame", background=THEME["bg"])
+        style.configure("Panel.TFrame", background=THEME["panel"])
+        style.configure("TLabelframe", background=THEME["bg"], bordercolor=THEME["border"], relief=tk.SOLID)
+        style.configure(
+            "TLabelframe.Label",
+            background=THEME["bg"],
+            foreground=THEME["accent"],
+            font=self.button_font,
+        )
+        style.configure("TLabel", background=THEME["bg"], foreground=THEME["text"])
+        style.configure("Title.TLabel", background=THEME["bg"], foreground=THEME["accent"], font=self.title_font)
+        style.configure("Muted.TLabel", background=THEME["bg"], foreground=THEME["muted"])
+        style.configure("Timer.TLabel", background=THEME["bg"], foreground=THEME["accent_active"], font=self.timer_font)
+        style.configure("TButton", background=THEME["panel_alt"], foreground=THEME["text"], borderwidth=0, padding=(10, 6))
+        style.map("TButton", background=[("active", THEME["border"])], foreground=[("disabled", THEME["muted"])])
+        style.configure("Accent.TButton", background=THEME["accent"], foreground=THEME["bg"])
+        style.map("Accent.TButton", background=[("active", THEME["accent_active"])])
+        style.configure("Danger.TButton", background=THEME["danger"], foreground=THEME["text"])
+        style.map("Danger.TButton", background=[("active", THEME["danger_active"])])
+        style.configure("TScale", background=THEME["bg"], troughcolor=THEME["panel_alt"])
+        style.configure("Vertical.TScrollbar", background=THEME["panel_alt"], troughcolor=THEME["bg"])
+
     def _build_ui(self, first_config: GameConfig) -> None:
         self.root.title(tr("app_title"))
         self._build_menu()
 
-        outer = ttk.Frame(self.root, padding=10)
+        outer = ttk.Frame(self.root, padding=12)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        self.ui_title_label = ttk.Label(outer, text=tr("app_title"), font=self.title_font)
+        self.ui_title_label = ttk.Label(outer, text=tr("app_title"), style="Title.TLabel")
         self.ui_title_label.pack(anchor=tk.W)
-        ttk.Label(outer, textvariable=self.current_game_var, font=self.ui_font).pack(anchor=tk.W, pady=(2, 8))
+        ttk.Label(outer, textvariable=self.current_game_var, style="Muted.TLabel").pack(anchor=tk.W, pady=(2, 10))
 
         self.game_list_frame = ttk.LabelFrame(outer, text=tr("game_list_title"))
         self.game_list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
-        list_canvas = tk.Canvas(self.game_list_frame, height=126, highlightthickness=0)
+        list_canvas = tk.Canvas(
+            self.game_list_frame,
+            height=138,
+            bg=THEME["panel"],
+            highlightthickness=1,
+            highlightbackground=THEME["border"],
+            bd=0,
+        )
         self.game_list_canvas = list_canvas
         list_scrollbar = ttk.Scrollbar(self.game_list_frame, orient=tk.VERTICAL, command=list_canvas.yview)
-        self.game_list_body = ttk.Frame(list_canvas)
+        self.game_list_body = ttk.Frame(list_canvas, style="Panel.TFrame")
         self.game_list_body.bind("<Configure>", lambda _e: list_canvas.configure(scrollregion=list_canvas.bbox("all")))
         list_window = list_canvas.create_window((0, 0), window=self.game_list_body, anchor="nw")
         list_canvas.bind("<Configure>", lambda e: list_canvas.itemconfigure(list_window, width=e.width))
@@ -1260,44 +1991,108 @@ class ResidentPlayCueApp:
         for config in self._sorted_configs_by_recent_play():
             self._add_game_button(config)
 
-        self.time_label = ttk.Label(outer, textvariable=self.time_var, font=self.title_font)
+        self.time_label = ttk.Label(outer, textvariable=self.time_var, style="Timer.TLabel")
         self.time_label.pack(pady=(0, 8), anchor=tk.W)
 
         obs_frame = ttk.Frame(outer)
         obs_frame.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(obs_frame, textvariable=self.obs_status_var, font=self.ui_font).pack(anchor=tk.W)
+        ttk.Label(obs_frame, textvariable=self.obs_status_var, style="Muted.TLabel").pack(anchor=tk.W)
         self.obs_controls = ttk.Frame(obs_frame)
         self.obs_controls.pack(fill=tk.X, pady=(3, 0))
-        self.recording_start_button = ttk.Button(self.obs_controls, text=tr("start_recording"), command=self.start_recording)
+        self.recording_start_button = ttk.Button(
+            self.obs_controls,
+            text=tr("start_recording"),
+            command=self.start_recording,
+            style="Accent.TButton",
+        )
         self.recording_start_button.pack(
             side=tk.LEFT, expand=True, fill=tk.X
         )
-        self.recording_stop_button = ttk.Button(self.obs_controls, text=tr("stop_recording"), command=self.stop_recording)
+        self.recording_stop_button = ttk.Button(
+            self.obs_controls,
+            text=tr("stop_recording"),
+            command=self.stop_recording,
+            style="Danger.TButton",
+        )
         self.recording_stop_button.pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0)
         )
 
         self.link_frame = ttk.LabelFrame(outer, text=tr("links"))
         self.link_frame.pack(fill=tk.X, expand=False, pady=(0, 8))
-        canvas = tk.Canvas(self.link_frame, height=1, highlightthickness=0)
+        canvas = tk.Canvas(
+            self.link_frame,
+            height=1,
+            bg=THEME["panel"],
+            highlightthickness=1,
+            highlightbackground=THEME["border"],
+            bd=0,
+        )
         self.link_canvas = canvas
         scrollbar = ttk.Scrollbar(self.link_frame, orient=tk.VERTICAL, command=canvas.yview)
-        self.link_body = ttk.Frame(canvas)
+        self.link_body = ttk.Frame(canvas, style="Panel.TFrame")
         self.link_body.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=self.link_body, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        self.login_bonus_frame = ttk.LabelFrame(outer, text=tr("login_bonus"))
+        self.login_bonus_frame.pack(fill=tk.X, expand=False, pady=(0, 8))
+        ttk.Label(self.login_bonus_frame, textvariable=self.login_bonus_status_var, style="Muted.TLabel").pack(
+            anchor=tk.W, padx=4, pady=(3, 3)
+        )
+        login_game_row = ttk.Frame(self.login_bonus_frame)
+        login_game_row.pack(fill=tk.X, padx=4, pady=(0, 3))
+        self.login_bonus_game_check_button = ttk.Button(
+            login_game_row,
+            text=tr("login_bonus_game_check"),
+            command=lambda: self.start_login_bonus_check("game_screen"),
+        )
+        self.login_bonus_game_check_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.login_bonus_game_claimed_button = ttk.Button(
+            login_game_row,
+            text=tr("login_bonus_manual_claimed"),
+            command=lambda: self.set_login_bonus_manual("game_screen", "claimed"),
+        )
+        self.login_bonus_game_claimed_button.pack(side=tk.LEFT, padx=(4, 0))
+        self.login_bonus_game_unclaimed_button = ttk.Button(
+            login_game_row,
+            text=tr("login_bonus_manual_unclaimed"),
+            command=lambda: self.set_login_bonus_manual("game_screen", "unclaimed"),
+        )
+        self.login_bonus_game_unclaimed_button.pack(side=tk.LEFT, padx=(4, 0))
+        login_web_row = ttk.Frame(self.login_bonus_frame)
+        login_web_row.pack(fill=tk.X, padx=4, pady=(0, 4))
+        self.login_bonus_web_check_button = ttk.Button(
+            login_web_row,
+            text=tr("login_bonus_web_check"),
+            command=self.open_login_bonus_web,
+        )
+        self.login_bonus_web_check_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.login_bonus_web_claimed_button = ttk.Button(
+            login_web_row,
+            text=tr("login_bonus_manual_claimed"),
+            command=lambda: self.set_login_bonus_manual("web", "claimed"),
+        )
+        self.login_bonus_web_claimed_button.pack(side=tk.LEFT, padx=(4, 0))
+        self.login_bonus_web_unclaimed_button = ttk.Button(
+            login_web_row,
+            text=tr("login_bonus_manual_unclaimed"),
+            command=lambda: self.set_login_bonus_manual("web", "unclaimed"),
+        )
+        self.login_bonus_web_unclaimed_button.pack(side=tk.LEFT, padx=(4, 0))
+        self.login_bonus_frame.pack_forget()
+
         controls = ttk.Frame(outer)
         controls.pack(fill=tk.X)
-        ttk.Button(controls, textvariable=self.pause_var, command=self.start_recent_game).pack(
+        ttk.Button(controls, textvariable=self.pause_var, command=self.start_recent_game, style="Accent.TButton").pack(
             fill=tk.X
         )
         self.reset_button = ttk.Button(controls, text=tr("reset_time"), command=self.reset_timer)
 
         ttk.Button(outer, textvariable=self.topmost_var, command=self.toggle_topmost).pack(fill=tk.X, pady=(8, 4))
-        self.opacity_label = ttk.Label(outer, text=tr("opacity"), font=self.ui_font)
+        self.opacity_label = ttk.Label(outer, text=tr("opacity"), style="Muted.TLabel")
         self.opacity_label.pack(anchor=tk.W)
         ttk.Scale(outer, from_=0.3, to=1.0, variable=self.opacity_var, command=self.change_opacity).pack(fill=tk.X)
         self.close_button = ttk.Button(outer, text=tr("close"), command=self.close)
@@ -1353,6 +2148,18 @@ class ResidentPlayCueApp:
             self.recording_stop_button.configure(text=tr("stop_recording"))
         if self.link_frame is not None:
             self.link_frame.configure(text=tr("links"))
+        if self.login_bonus_frame is not None:
+            self.login_bonus_frame.configure(text=tr("login_bonus"))
+        if self.login_bonus_game_check_button is not None:
+            self.login_bonus_game_check_button.configure(text=tr("login_bonus_game_check"))
+        if self.login_bonus_web_check_button is not None:
+            self.login_bonus_web_check_button.configure(text=tr("login_bonus_web_check"))
+        for button in (self.login_bonus_game_claimed_button, self.login_bonus_web_claimed_button):
+            if button is not None:
+                button.configure(text=tr("login_bonus_manual_claimed"))
+        for button in (self.login_bonus_game_unclaimed_button, self.login_bonus_web_unclaimed_button):
+            if button is not None:
+                button.configure(text=tr("login_bonus_manual_unclaimed"))
         if self.reset_button is not None:
             self.reset_button.configure(text=tr("reset_time"))
         if self.opacity_label is not None:
@@ -1364,6 +2171,7 @@ class ResidentPlayCueApp:
         self._update_topmost_label()
         self.time_var.set(tr("play_time", time=PlayTimeLogger.format_hhmmss(self.current_elapsed_seconds())))
         self._update_obs_status()
+        self._refresh_login_bonus_status()
 
     def _add_game_button(self, config: GameConfig) -> None:
         if self.game_list_body is None:
@@ -1375,8 +2183,17 @@ class ResidentPlayCueApp:
             textvariable=button_var,
             anchor=tk.W,
             font=self.button_font,
-            padx=6,
-            pady=4,
+            padx=10,
+            pady=7,
+            bg=THEME["panel_alt"],
+            fg=THEME["text"],
+            activebackground=THEME["accent"],
+            activeforeground=THEME["bg"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=THEME["border"],
+            cursor="hand2",
             command=lambda item=config: self.start_game(item),
         )
         button.bind("<MouseWheel>", self._scroll_game_list)
@@ -1502,14 +2319,45 @@ class ResidentPlayCueApp:
             messagebox.showerror("自動起動設定エラー", str(exc))
 
     def prepare_obs_on_startup(self) -> None:
-        self.obs_controller.prepare(launch_as_admin=True, show_window=True)
-        self._update_obs_status()
-        self._update_obs_controls()
+        if self.closed or self.obs_prepare_running:
+            return
+        if not self.obs_controller.config.enabled:
+            self._update_obs_status()
+            self._update_obs_controls()
+            return
+        self.obs_prepare_running = True
+        done_queue: queue.Queue[None] = queue.Queue()
+
+        def worker() -> None:
+            try:
+                self.obs_controller.prepare(
+                    launch_as_admin=True,
+                    show_window=True,
+                    show_errors=False,
+                    connect_timeout_seconds=5,
+                )
+            finally:
+                done_queue.put(None)
+
+        def poll_done() -> None:
+            self._update_obs_status()
+            self._update_obs_controls()
+            try:
+                done_queue.get_nowait()
+            except queue.Empty:
+                if not self.closed:
+                    self.root.after(200, poll_done)
+                return
+            self.obs_prepare_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(200, poll_done)
 
     def _monitor_obs_status(self) -> None:
         if self.closed:
             return
-        self.obs_controller.poll_status()
+        if not self.obs_prepare_running:
+            self.obs_controller.poll_status()
         self._update_obs_status()
         self._update_obs_controls()
         self.root.after(5000, self._monitor_obs_status)
@@ -1569,6 +2417,7 @@ class ResidentPlayCueApp:
         self.opacity_var.set(config.opacity)
         self._set_waiting_ui(False)
         self._refresh_links()
+        self._refresh_login_bonus_status()
         self._fit_window_to_screen(config.window_width, config.window_height)
 
         self.launcher.launch_game(config)
@@ -1577,6 +2426,8 @@ class ResidentPlayCueApp:
             self._update_obs_status()
         self.launcher.open_links(config.auto_open_links)
         self._start_watcher(config)
+        if self.play_started:
+            self.start_login_bonus_check("game_screen")
 
     def _start_watcher(self, config: GameConfig) -> None:
         if not config.process_name:
@@ -1605,6 +2456,7 @@ class ResidentPlayCueApp:
         if self.config.obs.auto_start_recording_on_game_launch:
             self.obs_controller.start_recording()
             self._update_obs_status()
+        self.start_login_bonus_check("game_screen")
 
     def _update_config_process_name(self, config: GameConfig, process_name: str) -> None:
         try:
@@ -1636,10 +2488,124 @@ class ResidentPlayCueApp:
             return
         has_links = bool(self.config.buttons)
         for link in self.config.buttons:
-            ttk.Button(self.link_body, text=link.name, command=lambda item=link: self.launcher.open_link(item)).pack(
+            ttk.Button(
+                self.link_body,
+                text=link.name,
+                command=lambda item=link: self.launcher.open_link(item),
+                style="Accent.TButton",
+            ).pack(
                 fill=tk.X, padx=4, pady=3
             )
         self._set_link_area_expanded(has_links)
+
+    def _refresh_login_bonus_status(self) -> None:
+        if self.login_bonus_frame is None:
+            return
+        if self.config is None or not self.config.login_bonus.enabled:
+            self.login_bonus_status_var.set(tr("login_bonus_disabled"))
+            self._set_login_bonus_button_states(False, False)
+            self.login_bonus_frame.pack_forget()
+            return
+        if not self.login_bonus_frame.winfo_ismapped():
+            self.login_bonus_frame.pack(fill=tk.X, expand=False, pady=(0, 8))
+        can_auto_check = LoginBonusChecker.is_ocr_available()
+        self._set_login_bonus_button_states(
+            self.config.login_bonus.game_screen.enabled and can_auto_check,
+            self.config.login_bonus.web.enabled and can_auto_check,
+        )
+        game_status = self._login_bonus_display_status("game_screen")
+        web_status = self._login_bonus_display_status("web")
+        self.login_bonus_status_var.set(
+            f"{tr('login_bonus_game_source')}: {game_status} / {tr('login_bonus_web_source')}: {web_status}"
+        )
+
+    def _set_login_bonus_button_states(self, game_auto: bool, web_auto: bool) -> None:
+        game_enabled = self.config is not None and self.config.login_bonus.enabled and self.config.login_bonus.game_screen.enabled
+        web_enabled = self.config is not None and self.config.login_bonus.enabled and self.config.login_bonus.web.enabled
+        if self.login_bonus_game_check_button is not None:
+            self.login_bonus_game_check_button.configure(state=tk.NORMAL if game_auto else tk.DISABLED)
+        if self.login_bonus_web_check_button is not None:
+            self.login_bonus_web_check_button.configure(state=tk.NORMAL if web_auto else tk.DISABLED)
+        for button in (self.login_bonus_game_claimed_button, self.login_bonus_game_unclaimed_button):
+            if button is not None:
+                button.configure(state=tk.NORMAL if game_enabled else tk.DISABLED)
+        for button in (self.login_bonus_web_claimed_button, self.login_bonus_web_unclaimed_button):
+            if button is not None:
+                button.configure(state=tk.NORMAL if web_enabled else tk.DISABLED)
+
+    def _login_bonus_display_status(self, source: str) -> str:
+        if self.config is None:
+            return tr("login_bonus_unknown")
+        row = self.login_bonus_logger.latest(self.config, source)
+        if row is None:
+            return tr("login_bonus_unknown")
+        return self._login_bonus_status_text(row.get("status", "unknown"))
+
+    def _login_bonus_status_text(self, status: str) -> str:
+        return {
+            "claimed": tr("login_bonus_claimed"),
+            "unclaimed": tr("login_bonus_unclaimed"),
+            "unknown": tr("login_bonus_unknown"),
+        }.get(status, tr("login_bonus_unknown"))
+
+    def open_login_bonus_web(self) -> None:
+        if self.config is None:
+            return
+        source = self.config.login_bonus.web
+        if source.url:
+            self.launcher.open_link(LinkItem(name=tr("login_bonus"), url=source.url))
+        self.start_login_bonus_check("web")
+
+    def start_login_bonus_check(self, source: str) -> None:
+        if self.config is None or not self.config.login_bonus.enabled:
+            return
+        source_config = LoginBonusChecker._source_config(self.config, source)
+        if source_config is None or not source_config.enabled:
+            return
+        deadline = time.monotonic() + source_config.timeout_seconds
+        self._retry_login_bonus_check(source, deadline)
+
+    def _retry_login_bonus_check(self, source: str, deadline: float) -> None:
+        if self.config is None:
+            return
+        source_config = LoginBonusChecker._source_config(self.config, source)
+        if source_config is None:
+            return
+        status, evidence, method = self.login_bonus_checker.check(self.config, source)
+        if status in {"claimed", "unclaimed"}:
+            self._save_login_bonus_if_changed(source, status, evidence, method, manual=False)
+            self._refresh_login_bonus_status()
+            if status == "claimed":
+                return
+        if time.monotonic() >= deadline:
+            self._refresh_login_bonus_status()
+            return
+        delay_ms = max(1, source_config.retry_interval_seconds) * 1000
+        self.root.after(delay_ms, lambda: self._retry_login_bonus_check(source, deadline))
+
+    def _save_login_bonus_if_changed(
+        self,
+        source: str,
+        status: str,
+        evidence: str,
+        method: str,
+        manual: bool,
+    ) -> None:
+        if self.config is None:
+            return
+        latest = self.login_bonus_logger.latest(self.config, source)
+        if latest is not None and latest.get("status") == status and not manual:
+            return
+        try:
+            self.login_bonus_logger.save(self.config, source, status, evidence, method, manual)
+        except OSError as exc:
+            messagebox.showerror("Login Bonus Error", str(exc))
+
+    def set_login_bonus_manual(self, source: str, status: str) -> None:
+        if self.config is None:
+            return
+        self._save_login_bonus_if_changed(source, status, "manual", "manual", manual=True)
+        self._refresh_login_bonus_status()
 
     def _set_link_area_expanded(self, expanded: bool) -> None:
         if self.link_frame is None or self.link_canvas is None:
@@ -1705,13 +2671,16 @@ class ResidentPlayCueApp:
             self.reset_button.pack_forget()
         self.obs_status_var.set(self.obs_controller.status)
         self._refresh_links()
+        self._refresh_login_bonus_status()
         self._set_waiting_ui(True)
         self._refresh_game_list()
         self.root.title(tr("app_title"))
         self.time_var.set(tr("play_time", time="00:00:00"))
         self._fit_window_to_screen(self.root.winfo_width(), self.root.winfo_height())
 
-    def _on_unmap(self, _event) -> None:
+    def _on_unmap(self, event) -> None:
+        if event.widget is not self.root:
+            return
         if self.closed or self.root.state() != "iconic":
             return
         self.minimize_to_tray()
@@ -1719,21 +2688,27 @@ class ResidentPlayCueApp:
     def minimize_to_tray(self) -> None:
         if not self.tray_available:
             return
-        self.root.withdraw()
-        if self.tray_icon is not None:
+        if self.tray_icon is not None or self.tray_icon_creating:
+            self.root.withdraw()
             return
-        image = Image.new("RGB", (64, 64), "white")
-        draw = ImageDraw.Draw(image)
-        draw.ellipse((8, 8, 56, 56), fill="#2f6fed")
-        draw.rectangle((28, 16, 36, 48), fill="white")
-        menu = pystray.Menu(
-            pystray.MenuItem(tr("show"), lambda _icon, _item: self.root.after(0, self.restore_from_tray)),
-            pystray.MenuItem(tr("exit"), lambda _icon, _item: self.root.after(0, self.close)),
-        )
-        self.tray_icon = pystray.Icon("PlayCue", image, tr("app_title"), menu)
-        self.tray_icon.run_detached()
+        self.tray_icon_creating = True
+        try:
+            image = Image.new("RGB", (64, 64), "white")
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((8, 8, 56, 56), fill="#2f6fed")
+            draw.rectangle((28, 16, 36, 48), fill="white")
+            menu = pystray.Menu(
+                pystray.MenuItem(tr("show"), lambda _icon, _item: self.root.after(0, self.restore_from_tray)),
+                pystray.MenuItem(tr("exit"), lambda _icon, _item: self.root.after(0, self.close)),
+            )
+            self.tray_icon = pystray.Icon("PlayCue", image, tr("app_title"), menu)
+            self.tray_icon.run_detached()
+        finally:
+            self.tray_icon_creating = False
+        self.root.withdraw()
 
     def restore_from_tray(self) -> None:
+        self._stop_tray_icon()
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
@@ -1741,8 +2716,10 @@ class ResidentPlayCueApp:
     def _stop_tray_icon(self) -> None:
         if self.tray_icon is None:
             return
-        self.tray_icon.stop()
-        self.tray_icon = None
+        try:
+            self.tray_icon.stop()
+        finally:
+            self.tray_icon = None
 
     def show_summary(self, days: int) -> None:
         totals = self._play_seconds_by_game(days)
@@ -2062,10 +3039,14 @@ class ResidentPlayCueApp:
         self.root.attributes("-alpha", value)
 
     def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
         if self.watcher:
             self.watcher.stopped = True
         if self.play_started:
             self.save_log_once()
+        self._stop_tray_icon()
         self.root.destroy()
 
     def save_log_once(self) -> None:
