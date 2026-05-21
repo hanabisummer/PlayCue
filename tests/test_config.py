@@ -138,6 +138,52 @@ class ConfigTest(unittest.TestCase):
             "https://example.com/path",
         )
 
+    def test_game_site_searcher_prioritizes_site_types(self):
+        html = """
+        <a href="https://store.steampowered.com/app/1/Game">Game on Steam</a>
+        <a href="https://www.famitsu.com/article/game">Game News - Famitsu</a>
+        <a href="https://game8.jp/game">Game 攻略 - Game8</a>
+        <a href="https://forums.example-game.com/">Game Official Forum</a>
+        <a href="https://example-game.com/">Game Official Website</a>
+        """
+        links = PlayCue.GameSiteSearcher.links_from_html(html, max_results=5)
+        self.assertEqual([link.url for link in links], [
+            "https://example-game.com/",
+            "https://forums.example-game.com/",
+            "https://game8.jp/game",
+            "https://www.famitsu.com/article/game",
+            "https://store.steampowered.com/app/1/Game",
+        ])
+
+    def test_game_site_searcher_adds_ff14_official_link(self):
+        original_fetch = PlayCue.GameSiteSearcher._fetch_html
+        original_language = PlayCue.UI_LANGUAGE
+        try:
+            PlayCue.UI_LANGUAGE = "ja"
+            PlayCue.GameSiteSearcher._fetch_html = classmethod(lambda cls, query: "")
+            links = PlayCue.GameSiteSearcher.search("FF14", max_results=1)
+            self.assertEqual(links[0].url, "https://jp.finalfantasyxiv.com/lodestone/")
+        finally:
+            PlayCue.GameSiteSearcher._fetch_html = original_fetch
+            PlayCue.UI_LANGUAGE = original_language
+
+    def test_game_site_searcher_prioritizes_current_language(self):
+        html = """
+        <a href="https://pcgamingwiki.com/wiki/Game">Game Wiki Guide</a>
+        <a href="https://game8.jp/game">Game Guide - Game8</a>
+        """
+        original_language = PlayCue.UI_LANGUAGE
+        try:
+            PlayCue.UI_LANGUAGE = "ja"
+            ja_links = PlayCue.GameSiteSearcher.links_from_html(html, max_results=2)
+            self.assertEqual(ja_links[0].url, "https://game8.jp/game")
+
+            PlayCue.UI_LANGUAGE = "en"
+            en_links = PlayCue.GameSiteSearcher.links_from_html(html, max_results=2)
+            self.assertEqual(en_links[0].url, "https://pcgamingwiki.com/wiki/Game")
+        finally:
+            PlayCue.UI_LANGUAGE = original_language
+
     def test_watcher_waits_until_game_process_before_exit(self):
         class FakeProc:
             def __init__(self, name, exe=""):
