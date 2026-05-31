@@ -163,6 +163,7 @@ class ConfigLoader:
         return OBSConfig(
             enabled=bool(value.get("enabled", False)),
             auto_launch=bool(value.get("auto_launch", False)),
+            launch_as_admin=bool(value.get("launch_as_admin", True)),
             exe_path=str(value.get("exe_path", "")).strip(),
             working_dir=str(value.get("working_dir", "")).strip(),
             args=str(value.get("args", "")).strip(),

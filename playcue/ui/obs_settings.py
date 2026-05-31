@@ -69,6 +69,7 @@ class OBSSettingsWindow:
         self.websocket_port_var = tk.StringVar(value=str(config.websocket_port))
         self.websocket_password_var = tk.StringVar(value=config.websocket_password)
         self.auto_launch_var = tk.BooleanVar(value=config.auto_launch)
+        self.launch_as_admin_var = tk.BooleanVar(value=config.launch_as_admin)
         self.auto_start_recording_var = tk.BooleanVar(value=config.auto_start_recording_on_game_launch)
         self.auto_stop_recording_var = tk.BooleanVar(value=config.auto_stop_recording_on_game_exit)
         self._dependent_widgets: list[tk.Widget] = []
@@ -134,6 +135,21 @@ class OBSSettingsWindow:
             wraplength=480,
         )
         auto_launch_desc.pack(anchor=tk.W, padx=20, pady=(0, 4))
+
+        launch_as_admin_cb = _make_checkbutton(
+            automation_frame,
+            text=tr("obs_launch_as_admin"),
+            variable=self.launch_as_admin_var,
+        )
+        launch_as_admin_cb.pack(anchor=tk.W, padx=6, pady=(0, 0))
+        launch_as_admin_desc = ttk.Label(
+            automation_frame,
+            text=tr("obs_launch_as_admin_desc"),
+            foreground="#9aa9c4",
+            wraplength=480,
+        )
+        launch_as_admin_desc.pack(anchor=tk.W, padx=20, pady=(0, 4))
+        self._dependent_widgets.append(launch_as_admin_cb)
 
         auto_start_cb = _make_checkbutton(
             automation_frame,
@@ -222,6 +238,7 @@ class OBSSettingsWindow:
             websocket_port=port,
             websocket_password=self.websocket_password_var.get(),
             auto_launch=self.auto_launch_var.get(),
+            launch_as_admin=self.launch_as_admin_var.get(),
             auto_start_recording_on_game_launch=self.auto_start_recording_var.get(),
             auto_stop_recording_on_game_exit=self.auto_stop_recording_var.get(),
         )

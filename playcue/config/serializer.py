@@ -7,6 +7,7 @@ def obs_config_to_dict(config: OBSConfig) -> dict[str, object]:
     return {
         "enabled": config.enabled,
         "auto_launch": config.auto_launch,
+        "launch_as_admin": config.launch_as_admin,
         "exe_path": config.exe_path,
         "working_dir": config.working_dir,
         "args": config.args,

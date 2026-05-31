@@ -9,6 +9,7 @@
   "obs": {
     "enabled": false,
     "auto_launch": false,
+    "launch_as_admin": true,
     "exe_path": "C:/Path/To/OBS/obs64.exe",
     "working_dir": "C:/Path/To/OBS",
     "args": "--minimize-to-tray",
