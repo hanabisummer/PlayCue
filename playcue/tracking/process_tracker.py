@@ -71,7 +71,12 @@ class GameProcessWatcher:
             is_running = is_active
 
         if is_running:
-            self.seen_process = True
+            if not self.seen_process:
+                self.seen_process = True
+                # active_process_name 未設定時は process_name の初回検知で on_active を発火。
+                # active_process_name 設定時は上の is_active ブロックで発火するためここでは不要。
+                if not self.active_process_names and self.on_active:
+                    self.on_active()
             self.missing_count = 0
             return
 

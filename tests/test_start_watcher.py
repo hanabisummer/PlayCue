@@ -141,5 +141,111 @@ class StartWatcherWiringTest(unittest.TestCase):
         )
 
 
+class ProcessWatcherOnActiveTest(unittest.TestCase):
+    """GameProcessWatcher.tick() が on_active を正しいタイミングで呼ぶことを検証する。
+
+    回帰: v0.8 の active_process_name 配線修正により、active_process_name が空のゲームでは
+    on_active が永久に呼ばれなくなっていた。これによりタイマー開始と OBS 録画開始が機能しなかった。
+    """
+
+    def _make_watcher(self, process_name, active_process_name="", on_active=None, on_exit=None):
+        from playcue.tracking.process_tracker import GameProcessWatcher
+        return GameProcessWatcher(
+            process_name=process_name,
+            on_exit=on_exit or mock.MagicMock(),
+            active_process_name=active_process_name,
+            on_active=on_active or mock.MagicMock(),
+        )
+
+    def _make_proc(self, name: str) -> mock.MagicMock:
+        p = mock.MagicMock()
+        p.info = {"name": name, "exe": ""}
+        return p
+
+    def test_on_active_called_when_no_active_process_name(self):
+        """active_process_name 未設定: process_name が初回検知されたとき on_active が呼ばれる。"""
+        import playcue.tracking.process_tracker as mod
+
+        on_active = mock.MagicMock()
+        watcher = self._make_watcher("game.exe", active_process_name="", on_active=on_active)
+        proc = self._make_proc("game.exe")
+
+        with mock.patch.object(mod, "psutil") as mock_psutil:
+            mock_psutil.process_iter.return_value = [proc]
+            mock_psutil.NoSuchProcess = Exception
+            mock_psutil.AccessDenied = Exception
+            watcher.tick()
+
+        on_active.assert_called_once()
+
+    def test_on_active_called_only_once_on_repeated_ticks(self):
+        """process_name が連続検知されても on_active は1回だけ呼ばれる。"""
+        import playcue.tracking.process_tracker as mod
+
+        on_active = mock.MagicMock()
+        watcher = self._make_watcher("game.exe", active_process_name="", on_active=on_active)
+        proc = self._make_proc("game.exe")
+
+        with mock.patch.object(mod, "psutil") as mock_psutil:
+            mock_psutil.process_iter.return_value = [proc]
+            mock_psutil.NoSuchProcess = Exception
+            mock_psutil.AccessDenied = Exception
+            watcher.tick()
+            watcher.tick()
+            watcher.tick()
+
+        on_active.assert_called_once()
+
+    def test_on_active_not_called_before_process_detected(self):
+        """プロセスが未検知のうちは on_active は呼ばれない（猶予期間中）。"""
+        import playcue.tracking.process_tracker as mod
+
+        on_active = mock.MagicMock()
+        watcher = self._make_watcher("game.exe", active_process_name="", on_active=on_active)
+
+        with mock.patch.object(mod, "psutil") as mock_psutil:
+            mock_psutil.process_iter.return_value = []
+            mock_psutil.NoSuchProcess = Exception
+            mock_psutil.AccessDenied = Exception
+            watcher.tick()
+
+        on_active.assert_not_called()
+
+    def test_on_active_via_active_process_name_still_works(self):
+        """active_process_name 設定時: active_process_name 検知で on_active が呼ばれる（既存動作維持）。"""
+        import playcue.tracking.process_tracker as mod
+
+        on_active = mock.MagicMock()
+        watcher = self._make_watcher(
+            "launcher.exe", active_process_name="game.exe", on_active=on_active
+        )
+
+        with mock.patch.object(mod, "psutil") as mock_psutil:
+            mock_psutil.process_iter.return_value = [self._make_proc("game.exe")]
+            mock_psutil.NoSuchProcess = Exception
+            mock_psutil.AccessDenied = Exception
+            watcher.tick()
+
+        on_active.assert_called_once()
+
+    def test_on_active_not_double_fired_when_process_name_equals_active(self):
+        """process_name == active_process_name のとき on_active は1回だけ（is_active ブロックで発火）。"""
+        import playcue.tracking.process_tracker as mod
+
+        on_active = mock.MagicMock()
+        watcher = self._make_watcher(
+            "game.exe", active_process_name="game.exe", on_active=on_active
+        )
+
+        with mock.patch.object(mod, "psutil") as mock_psutil:
+            mock_psutil.process_iter.return_value = [self._make_proc("game.exe")]
+            mock_psutil.NoSuchProcess = Exception
+            mock_psutil.AccessDenied = Exception
+            watcher.tick()
+            watcher.tick()
+
+        on_active.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
