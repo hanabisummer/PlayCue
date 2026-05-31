@@ -35,6 +35,7 @@ class LoginBonusConfig:
 class OBSConfig:
     enabled: bool = False
     auto_launch: bool = False
+    launch_as_admin: bool = True
     exe_path: str = ""
     working_dir: str = ""
     args: str = ""

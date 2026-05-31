@@ -614,6 +614,7 @@ class ResidentPlayCueApp:
                     "websocket_port": obs_config.websocket_port,
                     "websocket_password": obs_config.websocket_password,
                     "auto_launch": obs_config.auto_launch,
+                    "launch_as_admin": obs_config.launch_as_admin,
                     "auto_start_recording_on_game_launch": obs_config.auto_start_recording_on_game_launch,
                     "auto_stop_recording_on_game_exit": obs_config.auto_stop_recording_on_game_exit,
                 }
@@ -650,7 +651,7 @@ class ResidentPlayCueApp:
         def worker() -> None:
             try:
                 self.obs_controller.prepare(
-                    launch_as_admin=True,
+                    launch_as_admin=self.obs_controller.config.launch_as_admin,
                     show_window=True,
                     show_errors=False,
                     connect_timeout_seconds=5,
@@ -795,7 +796,7 @@ class ResidentPlayCueApp:
             return
         watcher.tick()
         if self.watcher is watcher and not watcher.stopped:
-            self.root.after(5000, self._watch_process)
+            self.root.after(1000, self._watch_process)
 
     def _refresh_links(self) -> None:
         if self.link_body is None:
