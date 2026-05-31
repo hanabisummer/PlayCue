@@ -48,6 +48,38 @@ pyinstaller --onefile --windowed --name PlayCue PlayCue.py
 
 ---
 
+## 再ビルド時の注意（重要）
+
+一度ビルドした後に再ビルドする場合、以下の3点を確認しないと**古い挙動の exe がそのまま生成**されます。実際にこれが原因で「修正したはずなのに直っていない」状態が起きます。
+
+1. **最新のソースを取得する**
+
+   修正をマージした後は、ビルドするフォルダで最新を取得してください。
+
+   ```powershell
+   git pull
+   ```
+
+2. **古いビルド成果物を削除する**
+
+   PyInstaller は `build/` のキャッシュや既存の `.spec` を再利用することがあります。再ビルド前に削除してください。
+
+   ```powershell
+   Remove-Item -Recurse -Force build, dist, PlayCue.spec -ErrorAction SilentlyContinue
+   ```
+
+3. **起動中の `PlayCue.exe` を必ず終了する**
+
+   Windows は実行中の exe を上書き・削除できません（`dist` が「使用中」でロックされます）。古い `PlayCue.exe` を閉じてください。管理者権限で起動している場合は、**管理者権限の PowerShell** で次を実行します。
+
+   ```powershell
+   taskkill /F /IM PlayCue.exe
+   ```
+
+この3点を済ませてから、改めて `pyinstaller --onefile --windowed --name PlayCue PlayCue.py` を実行してください。
+
+---
+
 ## 配布パッケージの作成
 
 ```powershell

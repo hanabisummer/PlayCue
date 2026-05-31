@@ -141,20 +141,19 @@ def main() -> int:
         root.destroy()
         return 1
 
-    if not configs:
-        root = Tk()
-        root.withdraw()
-        body = "読み込めるゲーム設定がありません。\nconfigs フォルダ内の JSON 設定を確認してください。"
-        if warning_lines:
-            body += "\n\n読み込めなかったファイル:\n" + "\n".join(warning_lines)
-        messagebox.showerror("設定エラー", body)
-        root.destroy()
-        return 1
-
+    # 設定ゼロは異常ではなく「初回起動」。アプリを起動し、ResidentPlayCueApp が
+    # セットアップウィザードを開く（playcue/ui/app.py の _open_initial_wizard）。
+    # 致命的エラーで終了するのは、明示指定したファイルが壊れている場合のみ（上の except）。
     root = Tk()
     app = ResidentPlayCueApp(root, configs)
     if warning_lines:
-        body = "一部の設定ファイルを読み込めませんでした。\n\n" + "\n".join(warning_lines) + "\n\n正常に読み込めた設定のみで起動します。"
+        if configs:
+            intro = "一部の設定ファイルを読み込めませんでした。"
+            outro = "正常に読み込めた設定のみで起動します。"
+        else:
+            intro = "読み込めた設定ファイルがありませんでした。"
+            outro = "新しいゲームを追加してください。"
+        body = f"{intro}\n\n" + "\n".join(warning_lines) + f"\n\n{outro}"
         root.after(300, lambda: messagebox.showwarning("設定読み込み警告", body))
     root.mainloop()
     return 0
