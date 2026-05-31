@@ -41,7 +41,8 @@ def generate_ass(script_text: str, audio_path: Path | None, output_path: Path, c
     current = 0.0
     for chunk in chunks:
         end = min(duration, current + per_chunk)
-        events.append(f"Dialogue: 0,{_fmt_ass(current)},{_fmt_ass(end)},Default,,0,0,0,,{chunk.replace(chr(10), r'\\N')}")
+        ass_text = chunk.replace(chr(10), r"\N")
+        events.append(f"Dialogue: 0,{_fmt_ass(current)},{_fmt_ass(end)},Default,,0,0,0,,{ass_text}")
         current = end
     output_path.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
     return output_path

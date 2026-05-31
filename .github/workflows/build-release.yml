@@ -1,0 +1,58 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build exe and create release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build exe
+        shell: pwsh
+        run: |
+          pyinstaller --onefile --windowed --name PlayCue PlayCue.py
+
+      - name: Create release package
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $dist = "PlayCue-$tag"
+          New-Item -ItemType Directory -Force -Path $dist
+          Copy-Item dist\PlayCue.exe $dist\
+          Copy-Item README.md $dist\
+          Copy-Item README.en.md $dist\
+          Copy-Item LICENSE $dist\
+          New-Item -ItemType Directory -Force -Path $dist\configs
+          Copy-Item configs\example.json $dist\configs\
+          Compress-Archive -Path $dist\* -DestinationPath "PlayCue-$tag.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PlayCue-${{ github.ref_name }}.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false

@@ -1,40 +1,35 @@
 {
-  "game_name": "Sample Game",
-  "game_exe": "C:\\Games\\SampleGame\\SampleLauncher.exe",
+  "game_name": "Example Game",
+  "game_exe": "C:/Path/To/Game.exe",
   "game_args": "",
   "launch_unelevated": false,
-  "process_name": "SampleGame.exe",
-  "auto_close_on_game_exit": true,
+  "process_name": "Game.exe",
+  "active_process_name": "",
+  "auto_close_on_game_exit": false,
   "obs": {
     "enabled": false,
     "auto_launch": false,
-    "exe_path": "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe",
-    "working_dir": "C:\\Program Files\\obs-studio\\bin\\64bit",
+    "exe_path": "C:/Path/To/OBS/obs64.exe",
+    "working_dir": "C:/Path/To/OBS",
     "args": "--minimize-to-tray",
     "process_name": "obs64.exe",
     "websocket_host": "127.0.0.1",
     "websocket_port": 4455,
-    "websocket_password": "",
+    "websocket_password": "CHANGE_ME",
     "connect_timeout_seconds": 30,
     "connect_retry_interval_seconds": 2,
     "auto_start_recording_on_game_launch": false,
-    "auto_stop_recording_on_game_exit": true
+    "auto_stop_recording_on_game_exit": false
   },
   "login_bonus": {
     "enabled": false,
     "reset_time": "05:00",
     "game_screen": {
       "enabled": false,
-      "window_title": "Sample Game",
+      "window_title": "Example Game",
       "url": "",
-      "claimed_patterns": [
-        "Claimed",
-        "Received"
-      ],
-      "unclaimed_patterns": [
-        "Claim",
-        "Receive"
-      ],
+      "claimed_patterns": ["claimed", "received", "取得済み"],
+      "unclaimed_patterns": ["claim", "receive", "受け取る"],
       "timeout_seconds": 300,
       "retry_interval_seconds": 5,
       "ocr_languages": "jpn+eng"
@@ -43,33 +38,22 @@
       "enabled": false,
       "window_title": "",
       "url": "https://example.com/login-bonus",
-      "claimed_patterns": [
-        "Claimed",
-        "Received"
-      ],
-      "unclaimed_patterns": [
-        "Claim",
-        "Receive"
-      ],
+      "claimed_patterns": ["claimed", "received", "取得済み"],
+      "unclaimed_patterns": ["claim", "receive", "受け取る"],
       "timeout_seconds": 30,
       "retry_interval_seconds": 5,
       "ocr_languages": "jpn+eng"
     }
   },
-  "auto_open_links": [
+  "auto_open_links": [],
+  "buttons": [
     {
       "name": "Official Site",
       "url": "https://example.com"
-    }
-  ],
-  "buttons": [
+    },
     {
       "name": "Guide",
       "url": "https://example.com/guide"
-    },
-    {
-      "name": "Local Memo",
-      "url": "C:\\Users\\YourName\\Documents\\sample_game_memo.txt"
     }
   ],
   "always_on_top": true,
