@@ -4,7 +4,13 @@ import json
 from pathlib import Path
 
 import PlayCue
-from PlayCue import ConfigLoader, GameProcessWatcher, LoginBonusChecker, LoginBonusLogger
+import playcue.login_bonus.logger as login_bonus_logger_mod
+import playcue.tracking.process_tracker as process_tracker_mod
+import playcue.ui.i18n as i18n_mod
+from playcue.config.loader import ConfigLoader
+from playcue.login_bonus.checker import LoginBonusChecker
+from playcue.login_bonus.logger import LoginBonusLogger
+from playcue.tracking.process_tracker import GameProcessWatcher
 from shorts_agent.config import AgentConfig
 
 
@@ -100,16 +106,16 @@ class ConfigTest(unittest.TestCase):
                 encoding="utf-8",
             )
             cfg = ConfigLoader.load(config_path)
-            original_log_file = PlayCue.LOGIN_BONUS_LOG_FILE
-            PlayCue.LOGIN_BONUS_LOG_FILE = Path(tmp) / "login_bonus_history.csv"
+            original_log_file = login_bonus_logger_mod.LOGIN_BONUS_LOG_FILE
+            login_bonus_logger_mod.LOGIN_BONUS_LOG_FILE = Path(tmp) / "login_bonus_history.csv"
             try:
                 logger = LoginBonusLogger()
                 logger.save(cfg, "game_screen", "unknown")
-                self.assertFalse(PlayCue.LOGIN_BONUS_LOG_FILE.exists())
+                self.assertFalse(login_bonus_logger_mod.LOGIN_BONUS_LOG_FILE.exists())
                 logger.save(cfg, "game_screen", "claimed", evidence="claimed", method="manual", manual=True)
                 self.assertEqual(logger.latest(cfg, "game_screen")["status"], "claimed")
             finally:
-                PlayCue.LOGIN_BONUS_LOG_FILE = original_log_file
+                login_bonus_logger_mod.LOGIN_BONUS_LOG_FILE = original_log_file
 
     def test_login_bonus_checker_matches_patterns(self):
         source = PlayCue.LoginBonusSourceConfig(
@@ -157,32 +163,32 @@ class ConfigTest(unittest.TestCase):
 
     def test_game_site_searcher_adds_ff14_official_link(self):
         original_fetch = PlayCue.GameSiteSearcher._fetch_html
-        original_language = PlayCue.UI_LANGUAGE
+        original_language = i18n_mod.UI_LANGUAGE
         try:
-            PlayCue.UI_LANGUAGE = "ja"
+            i18n_mod.UI_LANGUAGE = "ja"
             PlayCue.GameSiteSearcher._fetch_html = classmethod(lambda cls, query: "")
             links = PlayCue.GameSiteSearcher.search("FF14", max_results=1)
             self.assertEqual(links[0].url, "https://jp.finalfantasyxiv.com/lodestone/")
         finally:
             PlayCue.GameSiteSearcher._fetch_html = original_fetch
-            PlayCue.UI_LANGUAGE = original_language
+            i18n_mod.UI_LANGUAGE = original_language
 
     def test_game_site_searcher_prioritizes_current_language(self):
         html = """
         <a href="https://pcgamingwiki.com/wiki/Game">Game Wiki Guide</a>
         <a href="https://game8.jp/game">Game Guide - Game8</a>
         """
-        original_language = PlayCue.UI_LANGUAGE
+        original_language = i18n_mod.UI_LANGUAGE
         try:
-            PlayCue.UI_LANGUAGE = "ja"
+            i18n_mod.UI_LANGUAGE = "ja"
             ja_links = PlayCue.GameSiteSearcher.links_from_html(html, max_results=2)
             self.assertEqual(ja_links[0].url, "https://game8.jp/game")
 
-            PlayCue.UI_LANGUAGE = "en"
+            i18n_mod.UI_LANGUAGE = "en"
             en_links = PlayCue.GameSiteSearcher.links_from_html(html, max_results=2)
             self.assertEqual(en_links[0].url, "https://pcgamingwiki.com/wiki/Game")
         finally:
-            PlayCue.UI_LANGUAGE = original_language
+            i18n_mod.UI_LANGUAGE = original_language
 
     def test_watcher_waits_until_game_process_before_exit(self):
         class FakeProc:
@@ -200,8 +206,8 @@ class ConfigTest(unittest.TestCase):
                 return [FakeProc(name) for name in self.names]
 
         fake_psutil = FakePsutil()
-        original_psutil = PlayCue.psutil
-        PlayCue.psutil = fake_psutil
+        original_psutil = process_tracker_mod.psutil
+        process_tracker_mod.psutil = fake_psutil
         active_calls = []
         exit_calls = []
         try:
@@ -226,7 +232,7 @@ class ConfigTest(unittest.TestCase):
             watcher.tick()
             self.assertEqual(exit_calls, [True])
         finally:
-            PlayCue.psutil = original_psutil
+            process_tracker_mod.psutil = original_psutil
 
     def test_watcher_exits_when_launcher_closes_before_game_starts(self):
         class FakeProc:
@@ -244,8 +250,8 @@ class ConfigTest(unittest.TestCase):
                 return self.procs
 
         fake_psutil = FakePsutil()
-        original_psutil = PlayCue.psutil
-        PlayCue.psutil = fake_psutil
+        original_psutil = process_tracker_mod.psutil
+        process_tracker_mod.psutil = fake_psutil
         active_calls = []
         exit_calls = []
         try:
@@ -270,7 +276,7 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(active_calls, [])
             self.assertEqual(exit_calls, [True])
         finally:
-            PlayCue.psutil = original_psutil
+            process_tracker_mod.psutil = original_psutil
 
 
 if __name__ == "__main__":
