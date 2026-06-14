@@ -49,7 +49,15 @@ from playcue.ui.theme import THEME, OBS_STATUS_COLOR
 from playcue.ui.config_wizard import ConfigWizard
 from playcue.ui.obs_settings import OBSSettingsWindow
 from playcue.models import GameConfig, LinkItem, OBSConfig
-from playcue.paths import backup_configs_dir, play_history_log_file, play_time_summary_file
+from playcue.paths import (
+    backup_configs_dir,
+    play_history_log_file,
+    play_logs_db_file,
+    play_time_summary_file,
+)
+from playcue.session import GameSession, SessionStore, finish_session, now_jst, start_session
+from playcue.session.db import logger as session_db_logger
+from playcue.session.dialog import ask_session_memo, default_memo
 
 LOG_FILE = play_history_log_file()
 SUMMARY_FILE = play_time_summary_file()
@@ -127,6 +135,9 @@ class ResidentPlayCueApp:
         self.obs_controller = OBSController(_ui.obs)
         self.launcher = GameLauncher()
         self.logger = PlayTimeLogger()
+        # 攻略AIシステム用プレイログ基盤 (Phase 1)。DB が使えなくても本体は動かす。
+        self.session: GameSession | None = None
+        self.session_store: SessionStore | None = self._init_session_store()
         self.login_bonus_logger = LoginBonusLogger()
         self.login_bonus_checker = LoginBonusChecker()
         self.obs_prepare_running = False
@@ -743,6 +754,8 @@ class ResidentPlayCueApp:
         if not launched:
             self._reset_to_waiting_state()
             return
+        if self.play_started:
+            self._begin_session_log()
         if config.obs.auto_start_recording_on_game_launch and self.play_started:
             self.start_recording()
         self.launcher.open_links(config.auto_open_links)
@@ -774,6 +787,7 @@ class ResidentPlayCueApp:
         self.run_started_at = time.monotonic()
         self.paused = False
         self.play_started = True
+        self._begin_session_log()
         if self.config.obs.auto_start_recording_on_game_launch:
             self.start_recording()
         self.start_login_bonus_check("game_screen")
@@ -1000,6 +1014,7 @@ class ResidentPlayCueApp:
         self.stop_recording_for_game_exit()
         if self.play_started:
             self.save_log_once()
+            self._finish_session_log(show_dialog=True)
         self.config = None
         self.watcher = None
         self.session_start = datetime.now()
@@ -1608,8 +1623,92 @@ class ResidentPlayCueApp:
             self.watcher.stopped = True
         if self.play_started:
             self.save_log_once()
+            # 終了検知前にアプリを閉じたため、メモ入力なしで unknown_end として保存。
+            self._finish_session_log(show_dialog=False, status="unknown_end")
         self._stop_tray_icon()
         self.root.destroy()
+
+    def _init_session_store(self) -> SessionStore | None:
+        """play_logs.db を初期化する。失敗しても CSV ログと本体は継続する。"""
+        try:
+            store = SessionStore(play_logs_db_file())
+            if store.init_db():
+                return store
+        except Exception:  # pragma: no cover - DB は補助機能のため握りつぶす
+            session_db_logger.error("PlayCueDB failed to init store reason=init_error")
+        return None
+
+    def _begin_session_log(self) -> None:
+        """プレイ計測開始と同じ瞬間にセッションを DB へ登録する（CSV と整合）。"""
+        if self.config is None or self.session is not None:
+            return
+        try:
+            started = now_jst()
+            existing = (
+                self.session_store.existing_session_ids(started.strftime("%Y%m%d"))
+                if self.session_store is not None
+                else ()
+            )
+            session = start_session(self.config, started_at=started, existing_ids=existing)
+            self.session = session
+            session_db_logger.info(
+                "PlayCueSession started session_id=%s game_id=%s",
+                session.session_id,
+                session.game_id,
+            )
+            if self.session_store is not None:
+                self.session_store.insert_session(session)
+        except Exception:  # pragma: no cover - 補助機能。本体は落とさない。
+            session_db_logger.error("PlayCueDB failed to begin session reason=begin_error")
+
+    def _finish_session_log(self, *, show_dialog: bool, status: str = "finished") -> None:
+        """セッションを終了させ、終了時メモを反映して DB を更新する。"""
+        session = self.session
+        if session is None:
+            return
+        self.session = None
+        try:
+            finish_session(session, now_jst(), status=status)
+            memo = (
+                ask_session_memo(self.root, session.game_name)
+                if show_dialog
+                else default_memo()
+            )
+            session.mode = memo.get("mode") or None
+            session.build_or_deck_id = memo.get("build_or_deck_id") or None
+            session.result = str(memo.get("result") or "unknown")
+            session.score = memo.get("score") or None
+            session.advice_id = memo.get("advice_id") or None
+            session.memo = memo.get("memo") or None
+            session.privacy_level = str(memo.get("privacy_level") or "local_only")
+            session_db_logger.info(
+                "PlayCueSession finished session_id=%s duration_sec=%s result=%s",
+                session.session_id,
+                session.duration_sec,
+                session.result,
+            )
+            if self.session_store is not None:
+                self.session_store.update_session_finish(
+                    session.session_id,
+                    {
+                        "ended_at": session.ended_at,
+                        "duration_sec": session.duration_sec,
+                        "status": session.status,
+                        "updated_at": session.updated_at,
+                        "mode": session.mode,
+                        "build_or_deck_id": session.build_or_deck_id,
+                        "result": session.result,
+                        "score": session.score,
+                        "memo": session.memo,
+                        "advice_id": session.advice_id,
+                        "privacy_level": session.privacy_level,
+                    },
+                )
+        except Exception:  # pragma: no cover - 補助機能。本体は落とさない。
+            session_db_logger.error(
+                "PlayCueDB failed to finish session session_id=%s reason=finish_error",
+                session.session_id,
+            )
 
     def save_log_once(self) -> None:
         if self.config is None or self.log_saved:

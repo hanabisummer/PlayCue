@@ -58,6 +58,8 @@ class GameConfig:
     launch_unelevated: bool = False
     process_name: str = ""
     active_process_name: str = ""
+    game_id: str = ""
+    session_prefix: str = ""
     auto_close_on_game_exit: bool = False
     obs: OBSConfig = OBSConfig()
     login_bonus: LoginBonusConfig = LoginBonusConfig()
@@ -78,3 +80,9 @@ class GameConfig:
                         return name
         normalized = re.sub(r"\s+", "_", self.game_name.strip().lower())
         return normalized or "unknown"
+
+    def get_game_id(self) -> str:
+        """攻略AIログ用のゲームID。明示設定 ``game_id`` 優先、なければ ``get_game_key()``。"""
+        if self.game_id and self.game_id.strip():
+            return self.game_id.strip()
+        return self.get_game_key()

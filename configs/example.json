@@ -5,6 +5,8 @@
   "launch_unelevated": false,
   "process_name": "Game.exe",
   "active_process_name": "",
+  "game_id": "",
+  "session_prefix": "",
   "auto_close_on_game_exit": false,
   "obs": {
     "enabled": false,

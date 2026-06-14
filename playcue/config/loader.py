@@ -36,6 +36,8 @@ class ConfigLoader:
             launch_unelevated=bool(data.get("launch_unelevated", False)),
             process_name=str(data.get("process_name", "")).strip(),
             active_process_name=str(data.get("active_process_name", "")).strip(),
+            game_id=str(data.get("game_id", "")).strip(),
+            session_prefix=str(data.get("session_prefix", "")).strip(),
             auto_close_on_game_exit=bool(data.get("auto_close_on_game_exit", False)),
             obs=ConfigLoader._parse_obs(data.get("obs", {})),
             login_bonus=ConfigLoader._parse_login_bonus(data.get("login_bonus", {})),

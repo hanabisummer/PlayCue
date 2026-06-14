@@ -98,6 +98,8 @@ class UIRollbackOnLaunchFailureTest(unittest.TestCase):
         app.paused = True
         app.play_started = False
         app.log_saved = True
+        app.session = None
+        app.session_store = None
         app.watcher = None
         app.obs_prepare_running = False
         app.topmost = True
